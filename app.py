@@ -42,10 +42,11 @@ if "machine_counts_store" not in st.session_state:
 # ================================================================
 # MAIN TABS
 # ================================================================
-tab_calc, tab_add_part, tab_add_link = st.tabs([
+tab_calc, tab_add_part, tab_add_link, tab_edit = st.tabs([
     "🧮 Calculate Spare Parts",
     "➕ Add New Part",
     "🔗 Link Part to Machine",
+    "🛠️ Edit / Delete Part",
 ])
 
 # ================================================================
@@ -334,3 +335,84 @@ with tab_add_link:
         )
         st.caption(f"**{len(enriched)} parts** currently linked to **{link_machine}**:")
         st.dataframe(enriched, width="stretch", hide_index=True)
+
+# ================================================================
+# TAB 4 — EDIT / DELETE PART
+# ================================================================
+with tab_edit:
+    st.subheader("Edit or Delete a Part")
+    st.caption("Fix typos, update details, or remove a part from the database.")
+
+    if parts_df.empty:
+        st.info("No parts in the catalogue yet.")
+    else:
+        all_pns = sorted(parts_df["PartNumber"].dropna().unique())
+        sel = st.selectbox("Select a part", all_pns, key="edit_sel")
+        row = parts_df[parts_df["PartNumber"] == sel].iloc[0]
+
+        # references — shown so the user understands the impact of changes
+        refs = db.get_part_references(sel)
+        ref_bits = []
+        if refs["machine_links"]:
+            ref_bits.append(f"{refs['machine_links']} machine link(s)")
+        if refs["in_kits"]:
+            ref_bits.append(f"inside {refs['in_kits']} kit(s)")
+        if refs["is_kit_rows"]:
+            ref_bits.append(f"is a kit with {refs['is_kit_rows']} component(s)")
+        st.info("Used: " + (", ".join(ref_bits) if ref_bits else "not referenced anywhere."))
+
+        # ── EDIT ────────────────────────────────────────────────
+        st.markdown("##### Edit")
+        c1, c2 = st.columns(2)
+        with c1:
+            e_pn   = st.text_input("Part Number", value=sel, key=f"e_pn_{sel}")
+            e_desc = st.text_input("Description", value=row["Description"] if pd.notna(row["Description"]) else "", key=f"e_desc_{sel}")
+        with c2:
+            e_loc  = st.text_input("Location", value=row["Location"] if pd.notna(row["Location"]) else "", key=f"e_loc_{sel}")
+            svc_options = ["Maintenance", "Jobb"]
+            cur_svc = row["DefaultServiceType"] if row["DefaultServiceType"] in svc_options else "Maintenance"
+            e_svc  = st.selectbox("Service Type", svc_options, index=svc_options.index(cur_svc), key=f"e_svc_{sel}")
+
+        if st.button("💾 Save changes", width="stretch"):
+            e_pn_clean = str(e_pn).strip()
+            if not e_pn_clean:
+                st.error("Error: Part Number cannot be empty.")
+            elif not str(e_desc).strip():
+                st.error("Error: Description cannot be empty.")
+            else:
+                ok, msg = True, ""
+                # rename first if the part number changed (cascades to references)
+                if e_pn_clean != sel:
+                    ok, msg = db.rename_part(sel, e_pn_clean)
+                if ok:
+                    ok2, msg2 = db.update_part(e_pn_clean, str(e_desc).strip(), str(e_loc).strip(), e_svc)
+                    if ok2:
+                        load_tables_cached.clear()
+                        st.success(msg2 if not msg else f"{msg}  {msg2}")
+                        st.rerun()
+                    else:
+                        st.error(msg2)
+                else:
+                    st.error(msg)
+
+        # ── DELETE ──────────────────────────────────────────────
+        st.divider()
+        st.markdown("##### Delete")
+        referenced = bool(refs["machine_links"] or refs["in_kits"] or refs["is_kit_rows"])
+        if referenced:
+            st.warning(
+                "This part is referenced elsewhere. Deleting with cascade will also "
+                "remove its machine links and kit memberships."
+            )
+        cascade = st.checkbox(
+            "Also remove all references (cascade)", key=f"casc_{sel}", disabled=not referenced
+        )
+        confirm = st.checkbox(f"Yes, permanently delete **{sel}**", key=f"conf_{sel}")
+        if st.button("🗑️ Delete part", width="stretch", disabled=not confirm):
+            ok, msg = db.delete_part(sel, cascade=cascade)
+            if ok:
+                load_tables_cached.clear()
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)

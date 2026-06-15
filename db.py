@@ -194,3 +194,103 @@ def upsert_machine_part(machine_type, part_number, qty_per_machine):
     if existed:
         return True, f"Updated '{part_number}' on '{machine_type}': QtyPerMachine → {qty_per_machine}."
     return True, f"Part '{part_number}' linked to '{machine_type}' with QtyPerMachine={qty_per_machine}."
+
+
+def get_part_references(part_number):
+    """
+    Count where a part is used elsewhere, so the UI can warn before deleting:
+      machine_links  : rows in machine_parts pointing at this part
+      in_kits        : kits that CONTAIN this part as a component
+      is_kit_rows    : component rows belonging to this part when it IS a kit
+    """
+    eng = get_engine()
+    pn = str(part_number).strip()
+    with eng.connect() as conn:
+        machine_links = conn.execute(
+            text('SELECT COUNT(*) FROM machine_parts WHERE "PartNumber" = :pn'), {"pn": pn}
+        ).scalar()
+        in_kits = conn.execute(
+            text('SELECT COUNT(*) FROM kit_components WHERE "ComponentPartNumber" = :pn'), {"pn": pn}
+        ).scalar()
+        is_kit_rows = conn.execute(
+            text('SELECT COUNT(*) FROM kit_components WHERE "KitPartNumber" = :pn'), {"pn": pn}
+        ).scalar()
+    return {"machine_links": machine_links, "in_kits": in_kits, "is_kit_rows": is_kit_rows}
+
+
+def update_part(part_number, description, location, service_type):
+    """Update the editable fields of a part (everything except its number)."""
+    eng = get_engine()
+    with eng.begin() as conn:
+        res = conn.execute(
+            text('''UPDATE parts
+                       SET "Description" = :d, "Location" = :l, "DefaultServiceType" = :s
+                     WHERE "PartNumber" = :pn'''),
+            {"d": description, "l": location, "s": service_type, "pn": str(part_number).strip()},
+        )
+    if res.rowcount == 0:
+        return False, f"Error: part '{part_number}' not found."
+    return True, f"Part '{part_number}' updated."
+
+
+def rename_part(old_pn, new_pn):
+    """
+    Change a part's number (the primary key) and update every reference to it in
+    machine_parts and kit_components, all in one transaction. Use this to fix a
+    typo in the part number itself.
+    """
+    old_pn = str(old_pn).strip()
+    new_pn = str(new_pn).strip()
+    if not new_pn:
+        return False, "Error: new PartNumber cannot be empty."
+    if old_pn == new_pn:
+        return True, "No change to the part number."
+
+    eng = get_engine()
+    try:
+        with eng.begin() as conn:
+            taken = conn.execute(
+                text('SELECT 1 FROM parts WHERE "PartNumber" = :pn'), {"pn": new_pn}
+            ).first()
+            if taken:
+                return False, f"Error: PartNumber '{new_pn}' already exists."
+            for stmt in (
+                'UPDATE parts          SET "PartNumber"          = :new WHERE "PartNumber"          = :old',
+                'UPDATE machine_parts  SET "PartNumber"          = :new WHERE "PartNumber"          = :old',
+                'UPDATE kit_components SET "KitPartNumber"       = :new WHERE "KitPartNumber"       = :old',
+                'UPDATE kit_components SET "ComponentPartNumber" = :new WHERE "ComponentPartNumber" = :old',
+            ):
+                conn.execute(text(stmt), {"new": new_pn, "old": old_pn})
+        return True, f"Renamed '{old_pn}' → '{new_pn}' (all references updated)."
+    except Exception as e:
+        return False, f"Error: rename failed ({e.__class__.__name__})."
+
+
+def delete_part(part_number, cascade=False):
+    """
+    Delete a part. If it is still referenced and cascade is False, refuse and
+    report the references. If cascade is True, also remove its machine links and
+    its kit memberships (and, if it is a kit, its component list).
+    """
+    pn = str(part_number).strip()
+    refs = get_part_references(pn)
+    referenced = refs["machine_links"] or refs["in_kits"] or refs["is_kit_rows"]
+    if referenced and not cascade:
+        return False, (
+            f"Error: '{pn}' is still referenced — "
+            f"{refs['machine_links']} machine link(s), "
+            f"in {refs['in_kits']} kit(s), "
+            f"{refs['is_kit_rows']} component row(s) as a kit. "
+            "Tick the cascade option to remove it everywhere."
+        )
+
+    eng = get_engine()
+    with eng.begin() as conn:
+        if cascade:
+            conn.execute(text('DELETE FROM machine_parts  WHERE "PartNumber"          = :pn'), {"pn": pn})
+            conn.execute(text('DELETE FROM kit_components WHERE "ComponentPartNumber" = :pn'), {"pn": pn})
+            conn.execute(text('DELETE FROM kit_components WHERE "KitPartNumber"       = :pn'), {"pn": pn})
+        res = conn.execute(text('DELETE FROM parts WHERE "PartNumber" = :pn'), {"pn": pn})
+    if res.rowcount == 0:
+        return False, f"Error: part '{pn}' not found."
+    return True, f"Part '{pn}' deleted."
