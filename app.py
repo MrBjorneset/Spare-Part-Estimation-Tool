@@ -25,8 +25,16 @@ def _bootstrap_db():
 
 _bootstrap_db()
 
-# Read the four tables fresh on every run so edits by other users show up.
-machines_df, parts_df, machine_parts_df, kit_components_df = db.load_tables()
+# Read the four tables once and keep them in memory. Streamlit re-runs the whole
+# script on every click; without caching, each click would re-query the database
+# over the network and feel sluggish. The cache is cleared after any write (see
+# the Add Part / Link handlers) so changes still show up immediately, and a TTL
+# refreshes it periodically so edits from other users appear too.
+@st.cache_data(ttl=300, show_spinner=False)
+def load_tables_cached():
+    return db.load_tables()
+
+machines_df, parts_df, machine_parts_df, kit_components_df = load_tables_cached()
 
 if "machine_counts_store" not in st.session_state:
     st.session_state.machine_counts_store = {}
@@ -251,6 +259,7 @@ with tab_add_part:
                 service_type=str(new_svc).strip(),
             )
             if ok:
+                load_tables_cached.clear()
                 st.success(db_msg)
                 st.rerun()
             else:
@@ -307,6 +316,7 @@ with tab_add_link:
                 qty_per_machine=link_qty,
             )
             if ok:
+                load_tables_cached.clear()
                 st.success(db_msg)
                 st.rerun()
             else:
