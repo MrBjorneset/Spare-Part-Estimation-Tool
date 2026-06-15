@@ -58,6 +58,16 @@ _SEED = {
     "kit_components": ("kit_components.csv",  ["KitPartNumber", "ComponentPartNumber", "QtyPerKit"]),
 }
 
+# Primary-key columns per table. Rows missing any of these, or duplicating an
+# existing key, are dropped before seeding — Postgres (unlike SQLite) rejects
+# NULLs and duplicates in a primary key, so we clean them out here.
+_PK = {
+    "machines":       ["MachineType", "Model"],
+    "parts":          ["PartNumber"],
+    "machine_parts":  ["MachineType", "PartNumber"],
+    "kit_components": ["KitPartNumber", "ComponentPartNumber"],
+}
+
 _engine = None
 
 # Seed CSVs live in a "datasetts" folder alongside the code, resolved relative to
@@ -123,6 +133,14 @@ def seed_if_empty(csv_dir=None):
             for c in df.select_dtypes(include="object").columns:
                 df[c] = df[c].str.strip()
             df = df[[c for c in columns if c in df.columns]]
+
+            # Drop rows that would violate the primary key in Postgres:
+            # any blank/NULL key column, or duplicate key combinations.
+            pk = _PK[table]
+            for c in pk:
+                df = df[df[c].notna() & (df[c].astype(str).str.strip() != "")]
+            df = df.drop_duplicates(subset=pk, keep="first")
+
             df.to_sql(table, conn, if_exists="append", index=False)
 
 
