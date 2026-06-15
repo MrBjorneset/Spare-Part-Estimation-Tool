@@ -42,11 +42,12 @@ if "machine_counts_store" not in st.session_state:
 # ================================================================
 # MAIN TABS
 # ================================================================
-tab_calc, tab_add_part, tab_add_link, tab_edit = st.tabs([
+tab_calc, tab_add_part, tab_add_link, tab_edit, tab_machines = st.tabs([
     "🧮 Calculate Spare Parts",
     "➕ Add New Part",
     "🔗 Link Part to Machine",
     "🛠️ Edit / Delete Part",
+    "🏭 Machines",
 ])
 
 # ================================================================
@@ -410,6 +411,72 @@ with tab_edit:
         confirm = st.checkbox(f"Yes, permanently delete **{sel}**", key=f"conf_{sel}")
         if st.button("🗑️ Delete part", width="stretch", disabled=not confirm):
             ok, msg = db.delete_part(sel, cascade=cascade)
+            if ok:
+                load_tables_cached.clear()
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+# ================================================================
+# TAB 5 — MACHINES
+# ================================================================
+with tab_machines:
+    st.subheader("Add a New Machine")
+    st.caption("Register a new machine model so parts can be linked to it.")
+
+    techs = sorted(machines_df["MachineType"].dropna().unique())
+    NEW_TECH = "➕ New technology…"
+
+    c1, c2 = st.columns(2)
+    with c1:
+        tech_choice = st.selectbox("Technology", techs + [NEW_TECH], key="m_tech_choice")
+        if tech_choice == NEW_TECH:
+            tech_val = st.text_input("New technology name", placeholder="e.g. TIJ", key="m_new_tech")
+        else:
+            tech_val = tech_choice
+    with c2:
+        model_val = st.text_input("Model name *", placeholder="e.g. A720", key="m_model")
+
+    if st.button("➕ Add machine", width="stretch", key="btn_add_machine"):
+        ok, msg = db.add_machine(tech_val, model_val)
+        if ok:
+            load_tables_cached.clear()
+            st.success(msg + " You can now link parts to it in the 🔗 tab.")
+            st.rerun()
+        else:
+            st.error(msg)
+
+    st.divider()
+
+    # ── Current machines ────────────────────────────────────────
+    if machines_df.empty:
+        st.info("No machines registered yet.")
+    else:
+        st.caption(f"**{len(machines_df)} machines** currently registered:")
+        st.dataframe(
+            machines_df.sort_values(["MachineType", "Model"]),
+            width="stretch", hide_index=True,
+        )
+
+        # ── Delete a machine ────────────────────────────────────
+        st.markdown("##### Delete a machine")
+        del_model = st.selectbox(
+            "Machine to delete", sorted(machines_df["Model"].dropna().unique()), key="m_del"
+        )
+        del_tech = machines_df.loc[machines_df["Model"] == del_model, "MachineType"].iloc[0]
+        links = db.get_machine_references(del_model)
+        if links:
+            st.warning(f"**{del_model}** has {links} part link(s). Cascade will remove those links too.")
+        else:
+            st.info(f"**{del_model}** has no part links.")
+
+        m_cascade = st.checkbox(
+            "Also remove its part links (cascade)", key=f"m_casc_{del_model}", disabled=not links
+        )
+        m_confirm = st.checkbox(f"Yes, delete machine **{del_model}**", key=f"m_conf_{del_model}")
+        if st.button("🗑️ Delete machine", width="stretch", disabled=not m_confirm):
+            ok, msg = db.delete_machine(del_tech, del_model, cascade=m_cascade)
             if ok:
                 load_tables_cached.clear()
                 st.success(msg)

@@ -294,3 +294,70 @@ def delete_part(part_number, cascade=False):
     if res.rowcount == 0:
         return False, f"Error: part '{pn}' not found."
     return True, f"Part '{pn}' deleted."
+
+
+def add_machine(machine_type, model):
+    """
+    Add a new machine: a (Technology, Model) pair. Model must be unique across
+    all technologies, because downstream the Model is the key that part links
+    and estimates are matched on.
+    """
+    mt = str(machine_type).strip()
+    md = str(model).strip()
+    if not mt:
+        return False, "Error: Technology cannot be empty."
+    if not md:
+        return False, "Error: Model cannot be empty."
+
+    eng = get_engine()
+    try:
+        with eng.begin() as conn:
+            clash = conn.execute(
+                text('SELECT "MachineType" FROM machines WHERE "Model" = :md'), {"md": md}
+            ).first()
+            if clash:
+                return False, f"Error: model '{md}' already exists (under '{clash[0]}')."
+            conn.execute(
+                text('INSERT INTO machines ("MachineType","Model") VALUES (:mt, :md)'),
+                {"mt": mt, "md": md},
+            )
+        return True, f"Machine '{md}' added under technology '{mt}'."
+    except Exception as e:
+        return False, f"Error: could not add machine ({e.__class__.__name__})."
+
+
+def get_machine_references(model):
+    """How many part links point at this machine model (in machine_parts)."""
+    eng = get_engine()
+    with eng.connect() as conn:
+        return conn.execute(
+            text('SELECT COUNT(*) FROM machine_parts WHERE "MachineType" = :m'),
+            {"m": str(model).strip()},
+        ).scalar()
+
+
+def delete_machine(machine_type, model, cascade=False):
+    """
+    Delete a machine. If it still has part links and cascade is False, refuse.
+    With cascade, also remove its rows from machine_parts.
+    """
+    mt = str(machine_type).strip()
+    md = str(model).strip()
+    links = get_machine_references(md)
+    if links and not cascade:
+        return False, (
+            f"Error: '{md}' still has {links} part link(s). "
+            "Tick the cascade option to remove them too."
+        )
+
+    eng = get_engine()
+    with eng.begin() as conn:
+        if cascade:
+            conn.execute(text('DELETE FROM machine_parts WHERE "MachineType" = :m'), {"m": md})
+        res = conn.execute(
+            text('DELETE FROM machines WHERE "MachineType" = :mt AND "Model" = :md'),
+            {"mt": mt, "md": md},
+        )
+    if res.rowcount == 0:
+        return False, f"Error: machine '{md}' not found."
+    return True, f"Machine '{md}' deleted."
