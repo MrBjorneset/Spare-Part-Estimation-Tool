@@ -338,9 +338,22 @@ with tab_add_link:
     # ============================================================
     else:
         st.caption("A kit is itself a part in the catalogue; here you define what it contains.")
+
+        existing_kits = (
+            sorted(kit_components_df["KitPartNumber"].dropna().unique())
+            if not kit_components_df.empty else []
+        )
+        NEW_KIT = "➕ New kit…"
+
         col6, col7, col8 = st.columns([2, 2, 1])
         with col6:
-            kit_pn = st.selectbox("Kit (part number) *", all_partnums, key="kit_pn")
+            kit_choice = st.selectbox("Kit (part number) *", existing_kits + [NEW_KIT], key="kit_choice")
+            if kit_choice == NEW_KIT:
+                kit_pn = st.selectbox(
+                    "Choose a part to turn into a kit", all_partnums, key="kit_new_pn"
+                )
+            else:
+                kit_pn = kit_choice
         with col7:
             comp_pn = st.selectbox("Component to add *", all_partnums, key="kit_comp")
         with col8:
