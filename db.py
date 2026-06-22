@@ -361,3 +361,59 @@ def delete_machine(machine_type, model, cascade=False):
     if res.rowcount == 0:
         return False, f"Error: machine '{md}' not found."
     return True, f"Machine '{md}' deleted."
+
+
+def upsert_kit_component(kit_part_number, component_part_number, qty_per_kit):
+    """
+    Add a component to a kit, or update its quantity if already present.
+    Both the kit and the component must exist in the parts catalogue, and a kit
+    cannot contain itself.
+    """
+    kit = str(kit_part_number).strip()
+    comp = str(component_part_number).strip()
+    if not kit:
+        return False, "Error: Kit part number cannot be empty."
+    if not comp:
+        return False, "Error: Component part number cannot be empty."
+    if kit == comp:
+        return False, "Error: a kit cannot contain itself."
+    try:
+        qty = int(qty_per_kit)
+    except (ValueError, TypeError):
+        return False, "Error: QtyPerKit must be an integer."
+    if qty < 1:
+        return False, "Error: QtyPerKit must be at least 1."
+
+    eng = get_engine()
+    with eng.begin() as conn:
+        if not conn.execute(text('SELECT 1 FROM parts WHERE "PartNumber" = :pn'), {"pn": kit}).first():
+            return False, f"Error: kit '{kit}' is not in the catalogue — add it as a part first."
+        if not conn.execute(text('SELECT 1 FROM parts WHERE "PartNumber" = :pn'), {"pn": comp}).first():
+            return False, f"Error: component '{comp}' is not in the catalogue — add it as a part first."
+        existed = conn.execute(
+            text('SELECT 1 FROM kit_components WHERE "KitPartNumber" = :k AND "ComponentPartNumber" = :c'),
+            {"k": kit, "c": comp},
+        ).first() is not None
+        conn.execute(
+            text('''INSERT INTO kit_components ("KitPartNumber","ComponentPartNumber","QtyPerKit")
+                    VALUES (:k, :c, :q)
+                    ON CONFLICT ("KitPartNumber","ComponentPartNumber")
+                    DO UPDATE SET "QtyPerKit" = excluded."QtyPerKit"'''),
+            {"k": kit, "c": comp, "q": qty},
+        )
+    if existed:
+        return True, f"Updated '{comp}' in kit '{kit}': QtyPerKit → {qty}."
+    return True, f"Added '{comp}' to kit '{kit}' (QtyPerKit={qty})."
+
+
+def delete_kit_component(kit_part_number, component_part_number):
+    """Remove one component from a kit."""
+    eng = get_engine()
+    with eng.begin() as conn:
+        res = conn.execute(
+            text('DELETE FROM kit_components WHERE "KitPartNumber" = :k AND "ComponentPartNumber" = :c'),
+            {"k": str(kit_part_number).strip(), "c": str(component_part_number).strip()},
+        )
+    if res.rowcount == 0:
+        return False, "Error: that component is not in the kit."
+    return True, f"Removed '{component_part_number}' from kit '{kit_part_number}'."

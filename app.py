@@ -275,67 +275,114 @@ with tab_add_part:
 # TAB 3 — LINK PART TO MACHINE
 # ================================================================
 with tab_add_link:
-    st.subheader("Link a Part to a Machine")
-    st.caption(
-        "Creates or updates a machine-part link in the database. "
-        "The part must already exist in the catalogue."
-    )
+    st.subheader("Link a Part")
+    st.caption("Add a part to a machine, or add a component to a kit. The part must already exist in the catalogue.")
 
     all_models   = sorted(machines_df["Model"].dropna().unique())
     all_partnums = sorted(parts_df["PartNumber"].dropna().unique())
 
-    col3, col4, col5 = st.columns([2, 2, 1])
-    with col3:
-        link_machine = st.selectbox("Machine Model *", all_models, key="link_machine")
-    with col4:
-        link_part = st.selectbox("Part Number *", all_partnums, key="link_part")
-    with col5:
-        link_qty = st.number_input("Qty per Machine *", min_value=1, step=1, value=1, key="link_qty")
+    link_type = st.radio(
+        "Link to", ["Machine", "Kit"], horizontal=True, key="link_type"
+    )
 
-    selected_part_row = parts_df[parts_df["PartNumber"] == link_part]
-    if not selected_part_row.empty:
-        st.caption(
-            f"**{link_part}** — "
-            f"{selected_part_row.iloc[0]['Description']}  |  "
-            f"Service type: {selected_part_row.iloc[0]['DefaultServiceType']}"
-        )
+    # ============================================================
+    # MACHINE LINK
+    # ============================================================
+    if link_type == "Machine":
+        col3, col4, col5 = st.columns([2, 2, 1])
+        with col3:
+            link_machine = st.selectbox("Machine Model *", all_models, key="link_machine")
+        with col4:
+            link_part = st.selectbox("Part Number *", all_partnums, key="link_part")
+        with col5:
+            link_qty = st.number_input("Qty per Machine *", min_value=1, step=1, value=1, key="link_qty")
 
-    if st.button("🔗 Link Part to Machine", width="stretch"):
-        # logic.add_machine_part validates (part exists, qty >= 1, etc.)
-        _, msg = add_machine_part(
-            machine_parts_df,
-            parts_df,
-            machine_type=link_machine,
-            part_number=link_part,
-            qty_per_machine=link_qty,
-        )
-        if msg.startswith("Error"):
-            st.error(msg)
-        else:
-            ok, db_msg = db.upsert_machine_part(
-                machine_type=link_machine,
-                part_number=link_part,
-                qty_per_machine=link_qty,
+        selected_part_row = parts_df[parts_df["PartNumber"] == link_part]
+        if not selected_part_row.empty:
+            st.caption(
+                f"**{link_part}** — "
+                f"{selected_part_row.iloc[0]['Description']}  |  "
+                f"Service type: {selected_part_row.iloc[0]['DefaultServiceType']}"
             )
+
+        if st.button("🔗 Link Part to Machine", width="stretch"):
+            _, msg = add_machine_part(
+                machine_parts_df, parts_df,
+                machine_type=link_machine, part_number=link_part, qty_per_machine=link_qty,
+            )
+            if msg.startswith("Error"):
+                st.error(msg)
+            else:
+                ok, db_msg = db.upsert_machine_part(link_machine, link_part, link_qty)
+                if ok:
+                    load_tables_cached.clear()
+                    st.success(db_msg)
+                    st.rerun()
+                else:
+                    st.error(db_msg)
+
+        st.divider()
+        machine_links = machine_parts_df[machine_parts_df["MachineType"] == link_machine]
+        if machine_links.empty:
+            st.caption(f"No parts linked to **{link_machine}** yet.")
+        else:
+            enriched = machine_links.merge(
+                parts_df[["PartNumber", "Description", "DefaultServiceType"]],
+                on="PartNumber", how="left",
+            )
+            st.caption(f"**{len(enriched)} parts** currently linked to **{link_machine}**:")
+            st.dataframe(enriched, width="stretch", hide_index=True)
+
+    # ============================================================
+    # KIT LINK
+    # ============================================================
+    else:
+        st.caption("A kit is itself a part in the catalogue; here you define what it contains.")
+        col6, col7, col8 = st.columns([2, 2, 1])
+        with col6:
+            kit_pn = st.selectbox("Kit (part number) *", all_partnums, key="kit_pn")
+        with col7:
+            comp_pn = st.selectbox("Component to add *", all_partnums, key="kit_comp")
+        with col8:
+            kit_qty = st.number_input("Qty per Kit *", min_value=1, step=1, value=1, key="kit_qty")
+
+        kit_row = parts_df[parts_df["PartNumber"] == kit_pn]
+        if not kit_row.empty:
+            st.caption(f"Kit **{kit_pn}** — {kit_row.iloc[0]['Description']}")
+
+        if st.button("📦 Add Component to Kit", width="stretch"):
+            ok, msg = db.upsert_kit_component(kit_pn, comp_pn, kit_qty)
             if ok:
                 load_tables_cached.clear()
-                st.success(db_msg)
+                st.success(msg)
                 st.rerun()
             else:
-                st.error(db_msg)
+                st.error(msg)
 
-    st.divider()
-    machine_links = machine_parts_df[machine_parts_df["MachineType"] == link_machine]
-    if machine_links.empty:
-        st.caption(f"No parts linked to **{link_machine}** yet.")
-    else:
-        enriched = machine_links.merge(
-            parts_df[["PartNumber", "Description", "DefaultServiceType"]],
-            on="PartNumber",
-            how="left",
-        )
-        st.caption(f"**{len(enriched)} parts** currently linked to **{link_machine}**:")
-        st.dataframe(enriched, width="stretch", hide_index=True)
+        st.divider()
+        contents = get_kit_breakdown(kit_components_df, parts_df, kit_pn, 1)
+        if contents.empty:
+            st.caption(f"**{kit_pn}** has no components yet.")
+        else:
+            st.caption(f"**{kit_pn}** currently contains {len(contents)} component(s):")
+            h0, h1, h2, h3 = st.columns([2, 3, 1, 1])
+            h0.markdown("**Component**")
+            h1.markdown("**Description**")
+            h2.markdown("**Qty/kit**")
+            h3.markdown("**Remove**")
+            for _, crow in contents.iterrows():
+                c0, c1, c2, c3 = st.columns([2, 3, 1, 1])
+                c0.write(crow["ComponentPartNumber"])
+                c1.write(crow["Description"])
+                c2.write(int(crow["QtyPerKit"]))
+                if c3.button("✕", key=f"rmkit_{kit_pn}_{crow['ComponentPartNumber']}"):
+                    ok, msg = db.delete_kit_component(kit_pn, crow["ComponentPartNumber"])
+                    if ok:
+                        load_tables_cached.clear()
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 # ================================================================
 # TAB 4 — EDIT / DELETE PART
