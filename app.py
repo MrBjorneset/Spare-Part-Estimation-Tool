@@ -364,25 +364,46 @@ with tab_add_link:
         if contents.empty:
             st.caption(f"**{kit_pn}** has no components yet.")
         else:
-            st.caption(f"**{kit_pn}** currently contains {len(contents)} component(s):")
+            st.caption(
+                f"**{kit_pn}** contains {len(contents)} component(s). "
+                "Change a Qty/kit and press Save, or ✕ to remove:"
+            )
             h0, h1, h2, h3 = st.columns([2, 3, 1, 1])
             h0.markdown("**Component**")
             h1.markdown("**Description**")
             h2.markdown("**Qty/kit**")
             h3.markdown("**Remove**")
+
+            edits = []
             for _, crow in contents.iterrows():
+                comp = crow["ComponentPartNumber"]
+                cur_qty = int(crow["QtyPerKit"])
                 c0, c1, c2, c3 = st.columns([2, 3, 1, 1])
-                c0.write(crow["ComponentPartNumber"])
+                c0.write(comp)
                 c1.write(crow["Description"])
-                c2.write(int(crow["QtyPerKit"]))
-                if c3.button("✕", key=f"rmkit_{kit_pn}_{crow['ComponentPartNumber']}"):
-                    ok, msg = db.delete_kit_component(kit_pn, crow["ComponentPartNumber"])
+                new_qty = c2.number_input(
+                    "qty", min_value=1, step=1, value=cur_qty,
+                    key=f"kq_{kit_pn}_{comp}", label_visibility="collapsed",
+                )
+                edits.append((comp, cur_qty, int(new_qty)))
+                if c3.button("✕", key=f"rmkit_{kit_pn}_{comp}"):
+                    ok, msg = db.delete_kit_component(kit_pn, comp)
                     if ok:
                         load_tables_cached.clear()
                         st.success(msg)
                         st.rerun()
                     else:
                         st.error(msg)
+
+            if st.button("💾 Save quantity changes", width="stretch", key=f"savekit_{kit_pn}"):
+                changed = 0
+                for comp, cur_qty, new_qty in edits:
+                    if new_qty != cur_qty:
+                        db.upsert_kit_component(kit_pn, comp, new_qty)
+                        changed += 1
+                load_tables_cached.clear()
+                st.success(f"Updated {changed} component(s)." if changed else "No quantity changes to save.")
+                st.rerun()
 
 # ================================================================
 # TAB 4 — EDIT / DELETE PART
