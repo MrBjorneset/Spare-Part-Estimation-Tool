@@ -36,6 +36,14 @@ def load_tables_cached():
 
 machines_df, parts_df, machine_parts_df, kit_components_df = load_tables_cached()
 
+# Friendly dropdown labels: show "PartNumber — Description" while the selectbox
+# still returns just the part number, so no downstream code changes.
+_part_desc = dict(zip(parts_df["PartNumber"], parts_df["Description"].fillna("")))
+
+def fmt_part(pn):
+    d = _part_desc.get(pn, "")
+    return f"{pn} — {d}" if d else str(pn)
+
 if "machine_counts_store" not in st.session_state:
     st.session_state.machine_counts_store = {}
 
@@ -293,7 +301,7 @@ with tab_add_link:
         with col3:
             link_machine = st.selectbox("Machine Model *", all_models, key="link_machine")
         with col4:
-            link_part = st.selectbox("Part Number *", all_partnums, key="link_part")
+            link_part = st.selectbox("Part Number *", all_partnums, format_func=fmt_part, key="link_part")
         with col5:
             link_qty = st.number_input("Qty per Machine *", min_value=1, step=1, value=1, key="link_qty")
 
@@ -347,15 +355,17 @@ with tab_add_link:
 
         col6, col7, col8 = st.columns([2, 2, 1])
         with col6:
-            kit_choice = st.selectbox("Kit (part number) *", existing_kits + [NEW_KIT], key="kit_choice")
+            kit_choice = st.selectbox(
+                "Kit (part number) *", existing_kits + [NEW_KIT], format_func=fmt_part, key="kit_choice"
+            )
             if kit_choice == NEW_KIT:
                 kit_pn = st.selectbox(
-                    "Choose a part to turn into a kit", all_partnums, key="kit_new_pn"
+                    "Choose a part to turn into a kit", all_partnums, format_func=fmt_part, key="kit_new_pn"
                 )
             else:
                 kit_pn = kit_choice
         with col7:
-            comp_pn = st.selectbox("Component to add *", all_partnums, key="kit_comp")
+            comp_pn = st.selectbox("Component to add *", all_partnums, format_func=fmt_part, key="kit_comp")
         with col8:
             kit_qty = st.number_input("Qty per Kit *", min_value=1, step=1, value=1, key="kit_qty")
 
@@ -429,7 +439,7 @@ with tab_edit:
         st.info("No parts in the catalogue yet.")
     else:
         all_pns = sorted(parts_df["PartNumber"].dropna().unique())
-        sel = st.selectbox("Select a part", all_pns, key="edit_sel")
+        sel = st.selectbox("Select a part", all_pns, format_func=fmt_part, key="edit_sel")
         row = parts_df[parts_df["PartNumber"] == sel].iloc[0]
 
         # references — shown so the user understands the impact of changes
