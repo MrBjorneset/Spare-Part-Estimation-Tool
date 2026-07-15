@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import html
+import streamlit.components.v1 as components
 from io import BytesIO
 import db
 from logic import calculate_spare_parts, add_part, add_machine_part, get_kit_breakdown
@@ -57,48 +58,41 @@ def fmt_part(pn):
     return f"{pn} — {d}" if d else str(pn)
 
 
-def build_stand_svg(build, comp_height, comp_length, comp_diameter, comp_width):
-    """
-    Render a simple 2D front elevation of the stand as an SVG string.
-    Pieces are stacked bottom-to-top in the order they were added. Feet/columns
-    use height and width; vertical pipes use length (up) and diameter (wide);
-    horizontal pipes use length (wide) and diameter (thick) and sit at the
-    current top without adding to the stacked height.
-    """
+def _stand_layout(build, comp_height, comp_length, comp_diameter, comp_width):
+    """Compute piece rectangles (in SVG px) for the front view. Returns a dict or None."""
     def num(d, pn):
         try:
             return float(d.get(pn) or 0)
         except (TypeError, ValueError):
             return 0.0
 
-    pieces = []
-    cur_y = 0.0
+    raw, cur_y = [], 0.0
     for pn, info in build.items():
         qty = int(info.get("Qty", 1))
         orient = info.get("Orientation", "")
         L, D = num(comp_length, pn), num(comp_diameter, pn)
-        if L > 0:  # pipe
+        if L > 0:
             if orient == "Horizontal":
-                w, h = L, (D if D > 0 else 20)
-                pieces.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "hpipe", "qty": qty})
-            else:      # vertical (default)
-                w, h = (D if D > 0 else 20), L * qty
-                pieces.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "vpipe", "qty": qty})
+                w, h, kind = L, (D if D > 0 else 20), "hpipe"
+                raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": kind, "qty": qty})
+            else:
+                w, h, kind = (D if D > 0 else 20), L * qty, "vpipe"
+                raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": kind, "qty": qty})
                 cur_y += h
-        else:      # foot / column
+        else:
             H, W = num(comp_height, pn), num(comp_width, pn)
             w = W if W > 0 else 80
             h = (H if H > 0 else 20) * qty
-            pieces.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "solid", "qty": qty})
+            raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "solid", "qty": qty})
             cur_y += h
 
-    if not pieces:
+    if not raw:
         return None
 
     total_h = cur_y
-    max_half = max((p["w"] / 2 for p in pieces), default=40)
+    max_half = max((p["w"] / 2 for p in raw), default=40)
     model_w = max(2 * max_half, 1)
-    model_h = max(total_h, max(p["y0"] + p["h"] for p in pieces), 1)
+    model_h = max(total_h, max(p["y0"] + p["h"] for p in raw), 1)
 
     W_px, H_px = 420, 540
     m_left, m_right, m_top, m_bottom = 70, 30, 30, 50
@@ -106,39 +100,111 @@ def build_stand_svg(build, comp_height, comp_length, comp_diameter, comp_width):
     scale = min(inner_w / model_w, inner_h / model_h)
     center_x = m_left + inner_w / 2
     baseline_y = H_px - m_bottom
-
     colors = {"solid": "#8aa0b6", "vpipe": "#5b8def", "hpipe": "#e0894a"}
-    svg = [f'<svg viewBox="0 0 {W_px} {H_px}" width="100%" style="max-width:{W_px}px" '
-           f'xmlns="http://www.w3.org/2000/svg">']
-    svg.append(f'<line x1="{m_left-15}" y1="{baseline_y}" x2="{W_px-m_right}" y2="{baseline_y}" '
-               f'stroke="#999" stroke-width="1.5"/>')
 
-    for p in pieces:
+    pieces = []
+    for p in raw:
         w_px, h_px = p["w"] * scale, p["h"] * scale
-        x = center_x - w_px / 2
-        y = baseline_y - (p["y0"] + p["h"]) * scale
-        fill = colors.get(p["kind"], "#999")
-        svg.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w_px:.1f}" height="{h_px:.1f}" '
-                   f'fill="{fill}" fill-opacity="0.85" stroke="#333" stroke-width="1" rx="2"/>')
-        lbl = html.escape(p["label"] + (f' ×{p["qty"]}' if p["qty"] > 1 else ''))
-        if h_px >= 14 and w_px >= 34:
-            svg.append(f'<text x="{center_x:.1f}" y="{y+h_px/2+4:.1f}" font-size="11" '
-                       f'text-anchor="middle" fill="#111">{lbl}</text>')
-        else:
-            svg.append(f'<text x="{x+w_px+6:.1f}" y="{y+h_px/2+4:.1f}" font-size="10" '
-                       f'text-anchor="start" fill="#111">{lbl}</text>')
+        pieces.append({
+            "x": center_x - w_px / 2,
+            "y": baseline_y - (p["y0"] + p["h"]) * scale,
+            "w": w_px, "h": h_px,
+            "fill": colors[p["kind"]],
+            "label": p["label"] + (f' ×{p["qty"]}' if p["qty"] > 1 else ''),
+        })
+    return {"pieces": pieces, "W": W_px, "H": H_px, "total_h": total_h,
+            "scale": scale, "baseline_y": baseline_y, "m_left": m_left}
 
-    # total-height dimension line on the left
-    top_y = baseline_y - total_h * scale
+
+def _dim_and_ground(layout):
+    """Shared baseline + total-height dimension SVG snippet."""
+    W, m_left, baseline_y = layout["W"], layout["m_left"], layout["baseline_y"]
+    top_y = baseline_y - layout["total_h"] * layout["scale"]
     dimx = m_left - 32
     mid_y = (baseline_y + top_y) / 2
-    svg.append(f'<line x1="{dimx}" y1="{baseline_y}" x2="{dimx}" y2="{top_y}" stroke="#555" stroke-width="1"/>')
-    svg.append(f'<line x1="{dimx-4}" y1="{baseline_y}" x2="{dimx+4}" y2="{baseline_y}" stroke="#555"/>')
-    svg.append(f'<line x1="{dimx-4}" y1="{top_y}" x2="{dimx+4}" y2="{top_y}" stroke="#555"/>')
-    svg.append(f'<text x="{dimx-6}" y="{mid_y:.1f}" font-size="11" fill="#333" text-anchor="middle" '
-               f'transform="rotate(-90 {dimx-6} {mid_y:.1f})">{total_h:g} mm</text>')
-    svg.append('</svg>')
-    return "".join(svg)
+    return (
+        f'<line x1="{m_left-15}" y1="{baseline_y}" x2="{W-30}" y2="{baseline_y}" stroke="#999" stroke-width="1.5"/>'
+        f'<line x1="{dimx}" y1="{baseline_y}" x2="{dimx}" y2="{top_y}" stroke="#555" stroke-width="1"/>'
+        f'<line x1="{dimx-4}" y1="{baseline_y}" x2="{dimx+4}" y2="{baseline_y}" stroke="#555"/>'
+        f'<line x1="{dimx-4}" y1="{top_y}" x2="{dimx+4}" y2="{top_y}" stroke="#555"/>'
+        f'<text x="{dimx-6}" y="{mid_y:.1f}" font-size="11" fill="#333" text-anchor="middle" '
+        f'transform="rotate(-90 {dimx-6} {mid_y:.1f})">{layout["total_h"]:g} mm</text>'
+    )
+
+
+def render_static_svg(layout):
+    """Static front elevation as an inline SVG string."""
+    parts = [f'<svg viewBox="0 0 {layout["W"]} {layout["H"]}" width="100%" '
+             f'style="max-width:{layout["W"]}px" xmlns="http://www.w3.org/2000/svg">',
+             _dim_and_ground(layout)]
+    for p in layout["pieces"]:
+        parts.append(f'<rect x="{p["x"]:.1f}" y="{p["y"]:.1f}" width="{p["w"]:.1f}" height="{p["h"]:.1f}" '
+                     f'fill="{p["fill"]}" fill-opacity="0.85" stroke="#333" stroke-width="1" rx="2"/>')
+        lbl = html.escape(p["label"])
+        if p["h"] >= 14 and p["w"] >= 34:
+            parts.append(f'<text x="{p["x"]+p["w"]/2:.1f}" y="{p["y"]+p["h"]/2+4:.1f}" font-size="11" '
+                         f'text-anchor="middle" fill="#111">{lbl}</text>')
+        else:
+            parts.append(f'<text x="{p["x"]+p["w"]+6:.1f}" y="{p["y"]+p["h"]/2+4:.1f}" font-size="10" '
+                         f'text-anchor="start" fill="#111">{lbl}</text>')
+    parts.append('</svg>')
+    return "".join(parts)
+
+
+def render_interactive_html(layout):
+    """Self-contained draggable front view (browser-only; positions are not saved)."""
+    W, H = layout["W"], layout["H"]
+    groups = []
+    for p in layout["pieces"]:
+        lbl = html.escape(p["label"])
+        groups.append(
+            f'<g class="piece" transform="translate(0,0)">'
+            f'<rect x="{p["x"]:.1f}" y="{p["y"]:.1f}" width="{p["w"]:.1f}" height="{p["h"]:.1f}" rx="2" '
+            f'fill="{p["fill"]}" fill-opacity="0.85" stroke="#333"/>'
+            f'<text x="{p["x"]+p["w"]/2:.1f}" y="{p["y"]+p["h"]/2+4:.1f}" font-size="11" '
+            f'text-anchor="middle" fill="#111" pointer-events="none">{lbl}</text>'
+            f'</g>'
+        )
+    groups_svg = "\n".join(groups)
+    ground = _dim_and_ground(layout)
+    return f'''
+<div style="font-family:sans-serif">
+  <button id="reset" style="margin:0 0 6px;padding:5px 12px;cursor:pointer;border:1px solid #ccc;border-radius:6px;background:#f7f7f7">↺ Reset layout</button>
+  <svg id="stage" viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px;border:1px solid #eee;border-radius:8px;touch-action:none;background:#fff">
+    {ground}
+    {groups_svg}
+  </svg>
+</div>
+<script>
+(function(){{
+  const svg=document.getElementById('stage');
+  let sel=null, offx=0, offy=0, tx=0, ty=0;
+  function pt(evt){{
+    const r=svg.getBoundingClientRect();
+    return {{x:(evt.clientX-r.left)*({W}/r.width), y:(evt.clientY-r.top)*({H}/r.height)}};
+  }}
+  svg.querySelectorAll('.piece').forEach(function(g){{
+    g.style.cursor='grab';
+    g.addEventListener('pointerdown',function(e){{
+      sel=g; g.setPointerCapture(e.pointerId);
+      const m=g.getAttribute('transform').match(/translate\\(([-0-9.]+),([-0-9.]+)\\)/);
+      tx=m?parseFloat(m[1]):0; ty=m?parseFloat(m[2]):0;
+      const p=pt(e); offx=p.x; offy=p.y; g.style.cursor='grabbing';
+      g.parentNode.appendChild(g);
+    }});
+    g.addEventListener('pointermove',function(e){{
+      if(sel!==g) return;
+      const p=pt(e);
+      g.setAttribute('transform','translate('+(tx+p.x-offx)+','+(ty+p.y-offy)+')');
+    }});
+    g.addEventListener('pointerup',function(e){{ if(sel===g){{sel=null; g.style.cursor='grab';}} }});
+  }});
+  document.getElementById('reset').addEventListener('click',function(){{
+    svg.querySelectorAll('.piece').forEach(function(g){{g.setAttribute('transform','translate(0,0)');}});
+  }});
+}})();
+</script>
+'''
 
 if "machine_counts_store" not in st.session_state:
     st.session_state.machine_counts_store = {}
@@ -775,34 +841,55 @@ with tab_stand:
                     "Orientation": orient or "—",
                     "Qty": qty,
                 })
-            bom = pd.DataFrame(rows).sort_values(["Category", "PartNumber"])
+            bom = pd.DataFrame(rows)
 
             st.metric("Total height", f"{total_height:g} mm")
             st.caption("Total height counts feet/columns and **vertical** pipes only.")
 
-            svg = build_stand_svg(build, comp_height, comp_length, comp_diameter, comp_width)
-            if svg:
+            layout = _stand_layout(build, comp_height, comp_length, comp_diameter, comp_width)
+            if layout:
                 with st.expander("📐 Front view", expanded=True):
-                    st.markdown(
-                        f'<div style="text-align:center">{svg}</div>',
-                        unsafe_allow_html=True,
+                    view_mode = st.radio(
+                        "View", ["Static", "Interactive (drag)"], horizontal=True, key="stand_view_mode",
+                        label_visibility="collapsed",
                     )
-                    st.caption("Schematic front elevation, stacked in the order added. Not to exact scale between very different sizes.")
+                    if view_mode == "Static":
+                        st.markdown(f'<div style="text-align:center">{render_static_svg(layout)}</div>',
+                                    unsafe_allow_html=True)
+                        st.caption("Schematic front elevation, stacked in the order added.")
+                    else:
+                        components.html(render_interactive_html(layout), height=layout["H"] + 70)
+                        st.caption("Drag pieces to rearrange on screen. This is for visual experimenting only — it isn't saved. Use ↺ Reset or the ▲▼ buttons in the list to change the actual stack.")
 
-            # rows with remove buttons
-            h0, h1, h2, h3, h4, h5 = st.columns([1.2, 1.4, 2.2, 1.6, 1.0, 0.7])
-            for c, t in zip((h0, h1, h2, h3, h4, h5),
-                            ["Category", "Part", "Description", "Dims (mm)", "Orient.", "Del"]):
+            # piece list in stack order (top of stack first), with reorder + remove
+            st.caption("Stack (top → bottom). Use ▲▼ to reorder, ✕ to remove:")
+            h0, h1, h2, h3, h4, h5, h6 = st.columns([0.5, 0.5, 1.3, 2.1, 1.5, 1.0, 0.6])
+            for c, t in zip((h0, h1, h2, h3, h4, h5, h6),
+                            ["▲", "▼", "Part", "Description", "Dims (mm)", "Orient.", "Del"]):
                 c.markdown(f"**{t}**")
-            for _, r in bom.iterrows():
-                c0, c1, c2, c3, c4, c5 = st.columns([1.2, 1.4, 2.2, 1.6, 1.0, 0.7])
-                c0.write(r["Category"])
-                c1.write(r["PartNumber"])
-                c2.write(r["Description"])
-                c3.write(r["Dimensions_mm"])
-                c4.write(r["Orientation"])
-                if c5.button("✕", key=f"rmstand_{r['PartNumber']}"):
-                    del st.session_state.stand_build[r["PartNumber"]]
+
+            keys = list(build.keys())
+            for disp_i, pn in enumerate(reversed(keys)):     # top of stack first
+                idx = len(keys) - 1 - disp_i                  # actual index (0 = bottom)
+                r = next(x for x in rows if x["PartNumber"] == pn)
+                c0, c1, c2, c3, c4, c5, c6 = st.columns([0.5, 0.5, 1.3, 2.1, 1.5, 1.0, 0.6])
+                # ▲ = move up in stack (toward top → higher index)
+                if c0.button("▲", key=f"up_{pn}", disabled=(idx == len(keys) - 1)):
+                    ks = list(build.keys()); j = idx + 1
+                    ks[idx], ks[j] = ks[j], ks[idx]
+                    st.session_state.stand_build = {k: build[k] for k in ks}
+                    st.rerun()
+                if c1.button("▼", key=f"down_{pn}", disabled=(idx == 0)):
+                    ks = list(build.keys()); j = idx - 1
+                    ks[idx], ks[j] = ks[j], ks[idx]
+                    st.session_state.stand_build = {k: build[k] for k in ks}
+                    st.rerun()
+                c2.write(r["PartNumber"])
+                c3.write(r["Description"])
+                c4.write(r["Dimensions_mm"])
+                c5.write(r["Orientation"])
+                if c6.button("✕", key=f"rmstand_{pn}"):
+                    del st.session_state.stand_build[pn]
                     st.rerun()
 
             # export BOM
