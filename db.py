@@ -52,6 +52,8 @@ _DDL = [
         "PartNumber"  TEXT PRIMARY KEY,
         "Category"    TEXT,
         "Height_mm"   DOUBLE PRECISION,
+        "Length_mm"   DOUBLE PRECISION,
+        "Diameter_mm" DOUBLE PRECISION,
         "Description" TEXT,
         "Notes"       TEXT
     )''',
@@ -60,10 +62,11 @@ _DDL = [
         "Notes"      TEXT
     )''',
     '''CREATE TABLE IF NOT EXISTS stand_config_items (
-        "ConfigName" TEXT,
-        "PartNumber" TEXT,
-        "Category"   TEXT,
-        "Qty"        INTEGER,
+        "ConfigName"  TEXT,
+        "PartNumber"  TEXT,
+        "Category"    TEXT,
+        "Qty"         INTEGER,
+        "Orientation" TEXT,
         PRIMARY KEY ("ConfigName", "PartNumber")
     )''',
 ]
@@ -76,7 +79,7 @@ _SEED = {
     "parts":            ("parts.csv",            ["PartNumber", "Description", "Location", "DefaultServiceType"]),
     "machine_parts":    ("machine_parts.csv",    ["MachineType", "PartNumber", "QtyPerMachine"]),
     "kit_components":   ("kit_components.csv",    ["KitPartNumber", "ComponentPartNumber", "QtyPerKit"]),
-    "stand_components": ("stand_components.csv",  ["PartNumber", "Category", "Height_mm", "Description", "Notes"]),
+    "stand_components": ("stand_components.csv",  ["PartNumber", "Category", "Height_mm", "Length_mm", "Diameter_mm", "Description", "Notes"]),
 }
 
 # Primary-key columns per table. Rows missing any of these, or duplicating an
@@ -129,7 +132,10 @@ def init_db():
     # Migrations for databases created by earlier versions. Each runs in its own
     # transaction and is ignored if it has already been applied.
     for table, alter in [
-        ("stand_components", 'ADD COLUMN "Description" TEXT'),
+        ("stand_components",   'ADD COLUMN "Description" TEXT'),
+        ("stand_components",   'ADD COLUMN "Length_mm" DOUBLE PRECISION'),
+        ("stand_components",   'ADD COLUMN "Diameter_mm" DOUBLE PRECISION'),
+        ("stand_config_items", 'ADD COLUMN "Orientation" TEXT'),
     ]:
         try:
             with eng.begin() as conn:
@@ -454,11 +460,12 @@ def delete_kit_component(kit_part_number, component_part_number):
 # ============================================================
 # STAND BUILDER
 # ============================================================
-def add_stand_component(part_number, category, height_mm, description="", notes=""):
+def add_stand_component(part_number, category, height_mm=0, length_mm=0,
+                        diameter_mm=0, description="", notes=""):
     """
-    Register a stand component (foot / column / pipe). Stand components are
-    self-contained — they carry their own description and do not need to exist
-    in the spare-parts catalogue.
+    Register a stand component. Feet/columns typically use Height_mm; pipes use
+    Length_mm and Diameter_mm. Stand components are self-contained — they carry
+    their own description and need not exist in the spare-parts catalogue.
     """
     pn = str(part_number).strip()
     cat = str(category).strip()
@@ -466,26 +473,42 @@ def add_stand_component(part_number, category, height_mm, description="", notes=
         return False, "Error: part number required."
     if not cat:
         return False, "Error: category required."
+
+    def _num(v, label):
+        if v is None or str(v).strip() == "":
+            return 0.0
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"Error: {label} must be a number.")
+        if f < 0:
+            raise ValueError(f"Error: {label} cannot be negative.")
+        return f
+
     try:
-        h = float(height_mm)
-    except (TypeError, ValueError):
-        return False, "Error: height must be a number."
-    if h < 0:
-        return False, "Error: height cannot be negative."
+        h = _num(height_mm, "height")
+        l = _num(length_mm, "length")
+        d = _num(diameter_mm, "diameter")
+    except ValueError as e:
+        return False, str(e)
 
     eng = get_engine()
     with eng.begin() as conn:
         conn.execute(
-            text('''INSERT INTO stand_components ("PartNumber","Category","Height_mm","Description","Notes")
-                    VALUES (:pn, :cat, :h, :d, :n)
+            text('''INSERT INTO stand_components
+                        ("PartNumber","Category","Height_mm","Length_mm","Diameter_mm","Description","Notes")
+                    VALUES (:pn, :cat, :h, :l, :d, :desc, :n)
                     ON CONFLICT ("PartNumber") DO UPDATE SET
                         "Category"    = excluded."Category",
                         "Height_mm"   = excluded."Height_mm",
+                        "Length_mm"   = excluded."Length_mm",
+                        "Diameter_mm" = excluded."Diameter_mm",
                         "Description" = excluded."Description",
                         "Notes"       = excluded."Notes"'''),
-            {"pn": pn, "cat": cat, "h": h, "d": str(description).strip(), "n": str(notes).strip()},
+            {"pn": pn, "cat": cat, "h": h, "l": l, "d": d,
+             "desc": str(description).strip(), "n": str(notes).strip()},
         )
-    return True, f"'{pn}' set as {cat} (height {h:g} mm)."
+    return True, f"'{pn}' saved ({cat})."
 
 
 def delete_stand_component(part_number):
@@ -533,10 +556,11 @@ def save_stand_config(name, items, notes=""):
         conn.execute(text('DELETE FROM stand_config_items WHERE "ConfigName" = :n'), {"n": nm})
         for it in items:
             conn.execute(
-                text('''INSERT INTO stand_config_items ("ConfigName","PartNumber","Category","Qty")
-                        VALUES (:n, :pn, :cat, :q)'''),
+                text('''INSERT INTO stand_config_items ("ConfigName","PartNumber","Category","Qty","Orientation")
+                        VALUES (:n, :pn, :cat, :q, :o)'''),
                 {"n": nm, "pn": str(it["PartNumber"]).strip(),
-                 "cat": str(it.get("Category", "")).strip(), "q": int(it["Qty"])},
+                 "cat": str(it.get("Category", "")).strip(), "q": int(it["Qty"]),
+                 "o": str(it.get("Orientation", "")).strip()},
             )
     return True, f"Saved configuration '{nm}' ({len(items)} item(s))."
 
