@@ -17,13 +17,18 @@ st.caption("Maintenance & job-based spare part estimation")
 # ---------------- DATABASE ----------------
 # Create tables (first run only) and seed them from the CSVs if empty.
 # After the first run the database is the source of truth; the CSVs are ignored.
+# SCHEMA_VERSION is part of the cache key: bump it whenever the schema changes so
+# that init_db() (and its migrations) re-runs on the next deploy, even if the
+# cached resource from a previous version is still around.
+SCHEMA_VERSION = 3
+
 @st.cache_resource
-def _bootstrap_db():
+def _bootstrap_db(schema_version):
     db.init_db()
     db.seed_if_empty()
     return True
 
-_bootstrap_db()
+_bootstrap_db(SCHEMA_VERSION)
 
 # Read the four tables once and keep them in memory. Streamlit re-runs the whole
 # script on every click; without caching, each click would re-query the database
@@ -593,10 +598,16 @@ with tab_stand:
     if "stand_build" not in st.session_state:
         st.session_state.stand_build = {}   # PartNumber -> {"Category":..., "Qty":...}
 
-    # helper lookups (stand components are self-contained: own description/height)
-    comp_cat    = dict(zip(stand_components_df["PartNumber"], stand_components_df["Category"]))    if not stand_components_df.empty else {}
-    comp_height = dict(zip(stand_components_df["PartNumber"], stand_components_df["Height_mm"]))   if not stand_components_df.empty else {}
-    _stand_desc = dict(zip(stand_components_df["PartNumber"], stand_components_df["Description"].fillna(""))) if not stand_components_df.empty else {}
+    # helper lookups (stand components are self-contained: own dims/description)
+    comp_cat      = dict(zip(stand_components_df["PartNumber"], stand_components_df["Category"]))    if not stand_components_df.empty else {}
+    comp_height   = dict(zip(stand_components_df["PartNumber"], stand_components_df["Height_mm"]))   if not stand_components_df.empty else {}
+    comp_length   = dict(zip(stand_components_df["PartNumber"], stand_components_df["Length_mm"]))   if not stand_components_df.empty and "Length_mm"   in stand_components_df.columns else {}
+    comp_diameter = dict(zip(stand_components_df["PartNumber"], stand_components_df["Diameter_mm"])) if not stand_components_df.empty and "Diameter_mm" in stand_components_df.columns else {}
+    _stand_desc   = dict(zip(stand_components_df["PartNumber"], stand_components_df["Description"].fillna(""))) if not stand_components_df.empty else {}
+
+    def is_pipe(pn):
+        """A component is treated as a pipe if it has a length (uses length/diameter)."""
+        return float(comp_length.get(pn) or 0) > 0
 
     def fmt_stand(pn):
         d = _stand_desc.get(pn, "")
@@ -616,14 +627,29 @@ with tab_stand:
                 stand_components_df.loc[stand_components_df["Category"] == sel_cat, "PartNumber"].unique()
             )
             sel_part = st.selectbox("Component", parts_in_cat, format_func=fmt_stand, key="stand_part")
+
+            # Pipes get an orientation choice; only a vertical pipe adds to height.
+            if is_pipe(sel_part):
+                sel_orient = st.radio(
+                    "Orientation", ["Vertical", "Horizontal"], horizontal=True, key="stand_orient",
+                    help="Vertical pipes add their length to the total stand height; horizontal ones don't.",
+                )
+                st.caption(
+                    f"Length {float(comp_length.get(sel_part) or 0):g} mm  ·  "
+                    f"Ø {float(comp_diameter.get(sel_part) or 0):g} mm"
+                )
+            else:
+                sel_orient = ""
+
             sel_qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="stand_qty")
 
             if st.button("＋ Add to stand", width="stretch"):
                 b = st.session_state.stand_build
                 if sel_part in b:
                     b[sel_part]["Qty"] += sel_qty
+                    b[sel_part]["Orientation"] = sel_orient
                 else:
-                    b[sel_part] = {"Category": sel_cat, "Qty": sel_qty}
+                    b[sel_part] = {"Category": sel_cat, "Qty": sel_qty, "Orientation": sel_orient}
                 st.rerun()
 
             if st.session_state.stand_build and st.button("🗑️ Clear stand", width="stretch"):
@@ -642,36 +668,50 @@ with tab_stand:
             total_height = 0.0
             for pn, info in build.items():
                 desc = _stand_desc.get(pn, "")
-                h = comp_height.get(pn, 0) or 0
                 qty = info["Qty"]
-                total_height += float(h) * qty
+                orient = info.get("Orientation", "")
+                if is_pipe(pn):
+                    length = float(comp_length.get(pn) or 0)
+                    diameter = float(comp_diameter.get(pn) or 0)
+                    dims = f"L {length:g} · Ø {diameter:g}"
+                    # only vertical pipes contribute to height
+                    if orient == "Vertical":
+                        total_height += length * qty
+                else:
+                    h = float(comp_height.get(pn) or 0)
+                    dims = f"H {h:g}"
+                    total_height += h * qty
                 rows.append({
                     "Category": info.get("Category", comp_cat.get(pn, "")),
                     "PartNumber": pn,
                     "Description": desc,
-                    "Height_mm": h,
+                    "Dimensions_mm": dims,
+                    "Orientation": orient or "—",
                     "Qty": qty,
                 })
             bom = pd.DataFrame(rows).sort_values(["Category", "PartNumber"])
 
             st.metric("Total height", f"{total_height:g} mm")
+            st.caption("Total height counts feet/columns and **vertical** pipes only.")
 
             # rows with remove buttons
-            h0, h1, h2, h3, h4 = st.columns([1.4, 1.6, 2.4, 0.8, 0.8])
-            for c, t in zip((h0, h1, h2, h3, h4), ["Category", "Part", "Description", "Qty", "Del"]):
+            h0, h1, h2, h3, h4, h5 = st.columns([1.2, 1.4, 2.2, 1.6, 1.0, 0.7])
+            for c, t in zip((h0, h1, h2, h3, h4, h5),
+                            ["Category", "Part", "Description", "Dims (mm)", "Orient.", "Del"]):
                 c.markdown(f"**{t}**")
             for _, r in bom.iterrows():
-                c0, c1, c2, c3, c4 = st.columns([1.4, 1.6, 2.4, 0.8, 0.8])
+                c0, c1, c2, c3, c4, c5 = st.columns([1.2, 1.4, 2.2, 1.6, 1.0, 0.7])
                 c0.write(r["Category"])
                 c1.write(r["PartNumber"])
                 c2.write(r["Description"])
-                c3.write(int(r["Qty"]))
-                if c4.button("✕", key=f"rmstand_{r['PartNumber']}"):
+                c3.write(r["Dimensions_mm"])
+                c4.write(r["Orientation"])
+                if c5.button("✕", key=f"rmstand_{r['PartNumber']}"):
                     del st.session_state.stand_build[r["PartNumber"]]
                     st.rerun()
 
             # export BOM
-            export_bom = bom[["Category", "PartNumber", "Description", "Qty", "Height_mm"]]
+            export_bom = bom[["Category", "PartNumber", "Description", "Qty", "Dimensions_mm", "Orientation"]]
             buf = BytesIO()
             export_bom.to_excel(buf, index=False)
             buf.seek(0)
@@ -690,7 +730,8 @@ with tab_stand:
         with sc1:
             save_name = st.text_input("Configuration name", key="stand_save_name", placeholder="e.g. T60i tall stand")
             if st.button("💾 Save configuration", width="stretch"):
-                items = [{"PartNumber": pn, "Category": i.get("Category", ""), "Qty": i["Qty"]}
+                items = [{"PartNumber": pn, "Category": i.get("Category", ""), "Qty": i["Qty"],
+                          "Orientation": i.get("Orientation", "")}
                          for pn, i in st.session_state.stand_build.items()]
                 ok, msg = db.save_stand_config(save_name, items)
                 if ok:
@@ -706,7 +747,12 @@ with tab_stand:
                 if b1.button("📂 Load", width="stretch"):
                     items = stand_items_df[stand_items_df["ConfigName"] == load_name]
                     st.session_state.stand_build = {
-                        row["PartNumber"]: {"Category": row["Category"], "Qty": int(row["Qty"])}
+                        row["PartNumber"]: {
+                            "Category": row["Category"],
+                            "Qty": int(row["Qty"]),
+                            "Orientation": (row["Orientation"] if "Orientation" in items.columns
+                                            and pd.notna(row["Orientation"]) else ""),
+                        }
                         for _, row in items.iterrows()
                     }
                     st.rerun()
@@ -726,22 +772,28 @@ with tab_stand:
     with st.expander("🧩 Manage stand components (define what can be used)"):
         st.caption(
             "Add stand parts here. These are self-contained — they don't need to be "
-            "in the spare-parts catalogue. Height is used to compute total stand height."
+            "in the spare-parts catalogue. Use **Height** for feet/columns, and "
+            "**Length + Diameter** for pipes."
         )
         mc1, mc2 = st.columns(2)
         with mc1:
             new_comp_pn = st.text_input("Part number *", key="stand_new_pn", placeholder="e.g. STAND-FOOT-01")
             new_comp_desc = st.text_input("Description", key="stand_new_desc", placeholder="e.g. Cast-iron foot 300 mm")
-        with mc2:
             existing_cats = sorted(stand_components_df["Category"].dropna().unique()) if not stand_components_df.empty else []
             base_cats = sorted(set(existing_cats) | {"Foot", "Column", "Pipe"})
             NEW_CAT = "➕ New category…"
             cat_choice = st.selectbox("Category", base_cats + [NEW_CAT], key="stand_new_cat_choice")
             new_cat = st.text_input("New category name", key="stand_new_cat") if cat_choice == NEW_CAT else cat_choice
-            new_h = st.number_input("Height (mm)", min_value=0.0, step=10.0, value=0.0, key="stand_new_h")
+        with mc2:
+            new_h = st.number_input("Height (mm) — feet/columns", min_value=0.0, step=10.0, value=0.0, key="stand_new_h")
+            new_l = st.number_input("Length (mm) — pipes", min_value=0.0, step=10.0, value=0.0, key="stand_new_l")
+            new_d = st.number_input("Diameter (mm) — pipes", min_value=0.0, step=1.0, value=0.0, key="stand_new_d")
 
         if st.button("➕ Add / update component", width="stretch"):
-            ok, msg = db.add_stand_component(new_comp_pn, new_cat, new_h, description=new_comp_desc)
+            ok, msg = db.add_stand_component(
+                new_comp_pn, new_cat, height_mm=new_h, length_mm=new_l,
+                diameter_mm=new_d, description=new_comp_desc,
+            )
             if ok:
                 load_stand_cached.clear()
                 st.success(msg)
@@ -752,11 +804,16 @@ with tab_stand:
         if not stand_components_df.empty:
             st.caption("Defined components:")
             for _, r in stand_components_df.sort_values(["Category", "PartNumber"]).iterrows():
-                d0, d1, d2, d3, d4 = st.columns([1.4, 1.6, 2.6, 1, 0.8])
+                d0, d1, d2, d3, d4 = st.columns([1.3, 1.5, 2.4, 1.5, 0.7])
                 d0.write(r["Category"])
                 d1.write(r["PartNumber"])
                 d2.write(r["Description"] if pd.notna(r["Description"]) else "")
-                d3.write(f"{r['Height_mm']:g} mm" if pd.notna(r["Height_mm"]) else "—")
+                length = r["Length_mm"] if "Length_mm" in stand_components_df.columns and pd.notna(r["Length_mm"]) else 0
+                if float(length or 0) > 0:
+                    diam = r["Diameter_mm"] if "Diameter_mm" in stand_components_df.columns and pd.notna(r["Diameter_mm"]) else 0
+                    d3.write(f"L {float(length):g} · Ø {float(diam or 0):g}")
+                else:
+                    d3.write(f"H {r['Height_mm']:g}" if pd.notna(r["Height_mm"]) else "—")
                 if d4.button("✕", key=f"delstandcomp_{r['PartNumber']}"):
                     ok, msg = db.delete_stand_component(r["PartNumber"])
                     if ok:
@@ -767,8 +824,10 @@ with tab_stand:
                         st.error(msg)
 
             # Export the palette so it can be committed back to datasetts/stand_components.csv
-            palette_csv = stand_components_df[["PartNumber", "Category", "Height_mm", "Description", "Notes"]] \
-                if "Notes" in stand_components_df.columns else stand_components_df
+            export_cols = [c for c in ["PartNumber", "Category", "Height_mm", "Length_mm",
+                                       "Diameter_mm", "Description", "Notes"]
+                           if c in stand_components_df.columns]
+            palette_csv = stand_components_df[export_cols]
             st.download_button(
                 "⬇️ Export palette as CSV (for datasetts/stand_components.csv)",
                 data=palette_csv.to_csv(index=False).encode("utf-8"),
