@@ -20,7 +20,12 @@ database they are loaded in once, after which the database is the source of trut
 - `logic.py` — calculation + validation (unchanged behaviour)
 - `db.py` — database connection, schema, seeding, read/write helpers
 - `requirements.txt` — dependencies
-- `datasetts/` — seed data: `parts.csv`, `machines.csv`, `machine_parts.csv`, `kit_components.csv`
+- `datasetts/` — seed data: `parts.csv`, `machines.csv`, `machine_parts.csv`, `kit_components.csv`, `stand_components.csv`
+
+  `stand_components.csv` seeds the Stand Builder palette (which parts are feet /
+  columns / pipes, and their height). Columns: `PartNumber, Category, Height_mm,
+  Notes`. Part numbers here should also exist in `parts.csv`. Saved stand
+  *configurations* are created in the app and are not seeded from a CSV.
 
 ---
 

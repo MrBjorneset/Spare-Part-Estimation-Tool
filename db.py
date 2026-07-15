@@ -68,21 +68,25 @@ _DDL = [
 ]
 
 # Which CSV seeds which table, and the columns to keep (in order).
+# Note: stand_configs / stand_config_items are runtime data (saved in the app),
+# so they are intentionally NOT seeded from CSV.
 _SEED = {
-    "machines":       ("machines.csv",       ["MachineType", "Model"]),
-    "parts":          ("parts.csv",          ["PartNumber", "Description", "Location", "DefaultServiceType"]),
-    "machine_parts":  ("machine_parts.csv",  ["MachineType", "PartNumber", "QtyPerMachine"]),
-    "kit_components": ("kit_components.csv",  ["KitPartNumber", "ComponentPartNumber", "QtyPerKit"]),
+    "machines":         ("machines.csv",         ["MachineType", "Model"]),
+    "parts":            ("parts.csv",            ["PartNumber", "Description", "Location", "DefaultServiceType"]),
+    "machine_parts":    ("machine_parts.csv",    ["MachineType", "PartNumber", "QtyPerMachine"]),
+    "kit_components":   ("kit_components.csv",    ["KitPartNumber", "ComponentPartNumber", "QtyPerKit"]),
+    "stand_components": ("stand_components.csv",  ["PartNumber", "Category", "Height_mm", "Notes"]),
 }
 
 # Primary-key columns per table. Rows missing any of these, or duplicating an
 # existing key, are dropped before seeding — Postgres (unlike SQLite) rejects
 # NULLs and duplicates in a primary key, so we clean them out here.
 _PK = {
-    "machines":       ["MachineType", "Model"],
-    "parts":          ["PartNumber"],
-    "machine_parts":  ["MachineType", "PartNumber"],
-    "kit_components": ["KitPartNumber", "ComponentPartNumber"],
+    "machines":         ["MachineType", "Model"],
+    "parts":            ["PartNumber"],
+    "machine_parts":    ["MachineType", "PartNumber"],
+    "kit_components":   ["KitPartNumber", "ComponentPartNumber"],
+    "stand_components": ["PartNumber"],
 }
 
 _engine = None
