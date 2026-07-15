@@ -54,6 +54,7 @@ _DDL = [
         "Height_mm"   DOUBLE PRECISION,
         "Length_mm"   DOUBLE PRECISION,
         "Diameter_mm" DOUBLE PRECISION,
+        "Width_mm"    DOUBLE PRECISION,
         "Description" TEXT,
         "Notes"       TEXT
     )''',
@@ -79,7 +80,7 @@ _SEED = {
     "parts":            ("parts.csv",            ["PartNumber", "Description", "Location", "DefaultServiceType"]),
     "machine_parts":    ("machine_parts.csv",    ["MachineType", "PartNumber", "QtyPerMachine"]),
     "kit_components":   ("kit_components.csv",    ["KitPartNumber", "ComponentPartNumber", "QtyPerKit"]),
-    "stand_components": ("stand_components.csv",  ["PartNumber", "Category", "Height_mm", "Length_mm", "Diameter_mm", "Description", "Notes"]),
+    "stand_components": ("stand_components.csv",  ["PartNumber", "Category", "Height_mm", "Length_mm", "Diameter_mm", "Width_mm", "Description", "Notes"]),
 }
 
 # Primary-key columns per table. Rows missing any of these, or duplicating an
@@ -135,6 +136,7 @@ def init_db():
         ("stand_components",   'ADD COLUMN "Description" TEXT'),
         ("stand_components",   'ADD COLUMN "Length_mm" DOUBLE PRECISION'),
         ("stand_components",   'ADD COLUMN "Diameter_mm" DOUBLE PRECISION'),
+        ("stand_components",   'ADD COLUMN "Width_mm" DOUBLE PRECISION'),
         ("stand_config_items", 'ADD COLUMN "Orientation" TEXT'),
     ]:
         try:
@@ -461,11 +463,12 @@ def delete_kit_component(kit_part_number, component_part_number):
 # STAND BUILDER
 # ============================================================
 def add_stand_component(part_number, category, height_mm=0, length_mm=0,
-                        diameter_mm=0, description="", notes=""):
+                        diameter_mm=0, width_mm=0, description="", notes=""):
     """
-    Register a stand component. Feet/columns typically use Height_mm; pipes use
-    Length_mm and Diameter_mm. Stand components are self-contained — they carry
-    their own description and need not exist in the spare-parts catalogue.
+    Register a stand component. Feet/columns typically use Height_mm (and Width_mm
+    for the front-view footprint); pipes use Length_mm and Diameter_mm. Stand
+    components are self-contained — they carry their own description and need not
+    exist in the spare-parts catalogue.
     """
     pn = str(part_number).strip()
     cat = str(category).strip()
@@ -489,6 +492,7 @@ def add_stand_component(part_number, category, height_mm=0, length_mm=0,
         h = _num(height_mm, "height")
         l = _num(length_mm, "length")
         d = _num(diameter_mm, "diameter")
+        w = _num(width_mm, "width")
     except ValueError as e:
         return False, str(e)
 
@@ -496,16 +500,17 @@ def add_stand_component(part_number, category, height_mm=0, length_mm=0,
     with eng.begin() as conn:
         conn.execute(
             text('''INSERT INTO stand_components
-                        ("PartNumber","Category","Height_mm","Length_mm","Diameter_mm","Description","Notes")
-                    VALUES (:pn, :cat, :h, :l, :d, :desc, :n)
+                        ("PartNumber","Category","Height_mm","Length_mm","Diameter_mm","Width_mm","Description","Notes")
+                    VALUES (:pn, :cat, :h, :l, :d, :w, :desc, :n)
                     ON CONFLICT ("PartNumber") DO UPDATE SET
                         "Category"    = excluded."Category",
                         "Height_mm"   = excluded."Height_mm",
                         "Length_mm"   = excluded."Length_mm",
                         "Diameter_mm" = excluded."Diameter_mm",
+                        "Width_mm"    = excluded."Width_mm",
                         "Description" = excluded."Description",
                         "Notes"       = excluded."Notes"'''),
-            {"pn": pn, "cat": cat, "h": h, "l": l, "d": d,
+            {"pn": pn, "cat": cat, "h": h, "l": l, "d": d, "w": w,
              "desc": str(description).strip(), "n": str(notes).strip()},
         )
     return True, f"'{pn}' saved ({cat})."

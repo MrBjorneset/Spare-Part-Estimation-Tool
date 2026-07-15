@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import html
 from io import BytesIO
 import db
 from logic import calculate_spare_parts, add_part, add_machine_part, get_kit_breakdown
@@ -20,7 +21,7 @@ st.caption("Maintenance & job-based spare part estimation")
 # SCHEMA_VERSION is part of the cache key: bump it whenever the schema changes so
 # that init_db() (and its migrations) re-runs on the next deploy, even if the
 # cached resource from a previous version is still around.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 @st.cache_resource
 def _bootstrap_db(schema_version):
@@ -54,6 +55,90 @@ _part_desc = dict(zip(parts_df["PartNumber"], parts_df["Description"].fillna("")
 def fmt_part(pn):
     d = _part_desc.get(pn, "")
     return f"{pn} — {d}" if d else str(pn)
+
+
+def build_stand_svg(build, comp_height, comp_length, comp_diameter, comp_width):
+    """
+    Render a simple 2D front elevation of the stand as an SVG string.
+    Pieces are stacked bottom-to-top in the order they were added. Feet/columns
+    use height and width; vertical pipes use length (up) and diameter (wide);
+    horizontal pipes use length (wide) and diameter (thick) and sit at the
+    current top without adding to the stacked height.
+    """
+    def num(d, pn):
+        try:
+            return float(d.get(pn) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    pieces = []
+    cur_y = 0.0
+    for pn, info in build.items():
+        qty = int(info.get("Qty", 1))
+        orient = info.get("Orientation", "")
+        L, D = num(comp_length, pn), num(comp_diameter, pn)
+        if L > 0:  # pipe
+            if orient == "Horizontal":
+                w, h = L, (D if D > 0 else 20)
+                pieces.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "hpipe", "qty": qty})
+            else:      # vertical (default)
+                w, h = (D if D > 0 else 20), L * qty
+                pieces.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "vpipe", "qty": qty})
+                cur_y += h
+        else:      # foot / column
+            H, W = num(comp_height, pn), num(comp_width, pn)
+            w = W if W > 0 else 80
+            h = (H if H > 0 else 20) * qty
+            pieces.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "solid", "qty": qty})
+            cur_y += h
+
+    if not pieces:
+        return None
+
+    total_h = cur_y
+    max_half = max((p["w"] / 2 for p in pieces), default=40)
+    model_w = max(2 * max_half, 1)
+    model_h = max(total_h, max(p["y0"] + p["h"] for p in pieces), 1)
+
+    W_px, H_px = 420, 540
+    m_left, m_right, m_top, m_bottom = 70, 30, 30, 50
+    inner_w, inner_h = W_px - m_left - m_right, H_px - m_top - m_bottom
+    scale = min(inner_w / model_w, inner_h / model_h)
+    center_x = m_left + inner_w / 2
+    baseline_y = H_px - m_bottom
+
+    colors = {"solid": "#8aa0b6", "vpipe": "#5b8def", "hpipe": "#e0894a"}
+    svg = [f'<svg viewBox="0 0 {W_px} {H_px}" width="100%" style="max-width:{W_px}px" '
+           f'xmlns="http://www.w3.org/2000/svg">']
+    svg.append(f'<line x1="{m_left-15}" y1="{baseline_y}" x2="{W_px-m_right}" y2="{baseline_y}" '
+               f'stroke="#999" stroke-width="1.5"/>')
+
+    for p in pieces:
+        w_px, h_px = p["w"] * scale, p["h"] * scale
+        x = center_x - w_px / 2
+        y = baseline_y - (p["y0"] + p["h"]) * scale
+        fill = colors.get(p["kind"], "#999")
+        svg.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w_px:.1f}" height="{h_px:.1f}" '
+                   f'fill="{fill}" fill-opacity="0.85" stroke="#333" stroke-width="1" rx="2"/>')
+        lbl = html.escape(p["label"] + (f' ×{p["qty"]}' if p["qty"] > 1 else ''))
+        if h_px >= 14 and w_px >= 34:
+            svg.append(f'<text x="{center_x:.1f}" y="{y+h_px/2+4:.1f}" font-size="11" '
+                       f'text-anchor="middle" fill="#111">{lbl}</text>')
+        else:
+            svg.append(f'<text x="{x+w_px+6:.1f}" y="{y+h_px/2+4:.1f}" font-size="10" '
+                       f'text-anchor="start" fill="#111">{lbl}</text>')
+
+    # total-height dimension line on the left
+    top_y = baseline_y - total_h * scale
+    dimx = m_left - 32
+    mid_y = (baseline_y + top_y) / 2
+    svg.append(f'<line x1="{dimx}" y1="{baseline_y}" x2="{dimx}" y2="{top_y}" stroke="#555" stroke-width="1"/>')
+    svg.append(f'<line x1="{dimx-4}" y1="{baseline_y}" x2="{dimx+4}" y2="{baseline_y}" stroke="#555"/>')
+    svg.append(f'<line x1="{dimx-4}" y1="{top_y}" x2="{dimx+4}" y2="{top_y}" stroke="#555"/>')
+    svg.append(f'<text x="{dimx-6}" y="{mid_y:.1f}" font-size="11" fill="#333" text-anchor="middle" '
+               f'transform="rotate(-90 {dimx-6} {mid_y:.1f})">{total_h:g} mm</text>')
+    svg.append('</svg>')
+    return "".join(svg)
 
 if "machine_counts_store" not in st.session_state:
     st.session_state.machine_counts_store = {}
@@ -603,6 +688,7 @@ with tab_stand:
     comp_height   = dict(zip(stand_components_df["PartNumber"], stand_components_df["Height_mm"]))   if not stand_components_df.empty else {}
     comp_length   = dict(zip(stand_components_df["PartNumber"], stand_components_df["Length_mm"]))   if not stand_components_df.empty and "Length_mm"   in stand_components_df.columns else {}
     comp_diameter = dict(zip(stand_components_df["PartNumber"], stand_components_df["Diameter_mm"])) if not stand_components_df.empty and "Diameter_mm" in stand_components_df.columns else {}
+    comp_width    = dict(zip(stand_components_df["PartNumber"], stand_components_df["Width_mm"]))    if not stand_components_df.empty and "Width_mm"    in stand_components_df.columns else {}
     _stand_desc   = dict(zip(stand_components_df["PartNumber"], stand_components_df["Description"].fillna(""))) if not stand_components_df.empty else {}
 
     def is_pipe(pn):
@@ -693,6 +779,15 @@ with tab_stand:
 
             st.metric("Total height", f"{total_height:g} mm")
             st.caption("Total height counts feet/columns and **vertical** pipes only.")
+
+            svg = build_stand_svg(build, comp_height, comp_length, comp_diameter, comp_width)
+            if svg:
+                with st.expander("📐 Front view", expanded=True):
+                    st.markdown(
+                        f'<div style="text-align:center">{svg}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("Schematic front elevation, stacked in the order added. Not to exact scale between very different sizes.")
 
             # rows with remove buttons
             h0, h1, h2, h3, h4, h5 = st.columns([1.2, 1.4, 2.2, 1.6, 1.0, 0.7])
@@ -786,13 +881,14 @@ with tab_stand:
             new_cat = st.text_input("New category name", key="stand_new_cat") if cat_choice == NEW_CAT else cat_choice
         with mc2:
             new_h = st.number_input("Height (mm) — feet/columns", min_value=0.0, step=10.0, value=0.0, key="stand_new_h")
+            new_w = st.number_input("Width (mm) — feet/columns footprint", min_value=0.0, step=10.0, value=0.0, key="stand_new_w")
             new_l = st.number_input("Length (mm) — pipes", min_value=0.0, step=10.0, value=0.0, key="stand_new_l")
             new_d = st.number_input("Diameter (mm) — pipes", min_value=0.0, step=1.0, value=0.0, key="stand_new_d")
 
         if st.button("➕ Add / update component", width="stretch"):
             ok, msg = db.add_stand_component(
                 new_comp_pn, new_cat, height_mm=new_h, length_mm=new_l,
-                diameter_mm=new_d, description=new_comp_desc,
+                diameter_mm=new_d, width_mm=new_w, description=new_comp_desc,
             )
             if ok:
                 load_stand_cached.clear()
@@ -825,7 +921,7 @@ with tab_stand:
 
             # Export the palette so it can be committed back to datasetts/stand_components.csv
             export_cols = [c for c in ["PartNumber", "Category", "Height_mm", "Length_mm",
-                                       "Diameter_mm", "Description", "Notes"]
+                                       "Diameter_mm", "Width_mm", "Description", "Notes"]
                            if c in stand_components_df.columns]
             palette_csv = stand_components_df[export_cols]
             st.download_button(
