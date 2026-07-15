@@ -23,9 +23,11 @@ database they are loaded in once, after which the database is the source of trut
 - `datasetts/` — seed data: `parts.csv`, `machines.csv`, `machine_parts.csv`, `kit_components.csv`, `stand_components.csv`
 
   `stand_components.csv` seeds the Stand Builder palette (which parts are feet /
-  columns / pipes, and their height). Columns: `PartNumber, Category, Height_mm,
-  Notes`. Part numbers here should also exist in `parts.csv`. Saved stand
-  *configurations* are created in the app and are not seeded from a CSV.
+  columns / pipes, their height and description). Columns: `PartNumber, Category,
+  Height_mm, Description, Notes`. Stand components are self-contained — they do
+  NOT need to exist in `parts.csv`. Manage them in the app's Stand Builder tab
+  (which writes to the database); use the tab's "Export palette as CSV" button to
+  refresh this seed file. Saved stand *configurations* are not seeded from a CSV.
 
 ---
 

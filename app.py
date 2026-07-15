@@ -593,9 +593,14 @@ with tab_stand:
     if "stand_build" not in st.session_state:
         st.session_state.stand_build = {}   # PartNumber -> {"Category":..., "Qty":...}
 
-    # helper lookups
+    # helper lookups (stand components are self-contained: own description/height)
     comp_cat    = dict(zip(stand_components_df["PartNumber"], stand_components_df["Category"]))    if not stand_components_df.empty else {}
     comp_height = dict(zip(stand_components_df["PartNumber"], stand_components_df["Height_mm"]))   if not stand_components_df.empty else {}
+    _stand_desc = dict(zip(stand_components_df["PartNumber"], stand_components_df["Description"].fillna(""))) if not stand_components_df.empty else {}
+
+    def fmt_stand(pn):
+        d = _stand_desc.get(pn, "")
+        return f"{pn} — {d}" if d else str(pn)
 
     left, right = st.columns([1, 2], gap="large")
 
@@ -610,7 +615,7 @@ with tab_stand:
             parts_in_cat = sorted(
                 stand_components_df.loc[stand_components_df["Category"] == sel_cat, "PartNumber"].unique()
             )
-            sel_part = st.selectbox("Component", parts_in_cat, format_func=fmt_part, key="stand_part")
+            sel_part = st.selectbox("Component", parts_in_cat, format_func=fmt_stand, key="stand_part")
             sel_qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="stand_qty")
 
             if st.button("＋ Add to stand", width="stretch"):
@@ -636,7 +641,7 @@ with tab_stand:
             rows = []
             total_height = 0.0
             for pn, info in build.items():
-                desc = _part_desc.get(pn, "")
+                desc = _stand_desc.get(pn, "")
                 h = comp_height.get(pn, 0) or 0
                 qty = info["Qty"]
                 total_height += float(h) * qty
@@ -719,21 +724,24 @@ with tab_stand:
     # ── Manage stand components (define the palette) ────────────
     st.divider()
     with st.expander("🧩 Manage stand components (define what can be used)"):
-        st.caption("Register catalogue parts as stand components. Height is used to compute total stand height.")
-        mc1, mc2, mc3 = st.columns([2, 1.4, 1])
+        st.caption(
+            "Add stand parts here. These are self-contained — they don't need to be "
+            "in the spare-parts catalogue. Height is used to compute total stand height."
+        )
+        mc1, mc2 = st.columns(2)
         with mc1:
-            new_comp_pn = st.selectbox("Catalogue part", all_partnums, format_func=fmt_part, key="stand_new_pn")
+            new_comp_pn = st.text_input("Part number *", key="stand_new_pn", placeholder="e.g. STAND-FOOT-01")
+            new_comp_desc = st.text_input("Description", key="stand_new_desc", placeholder="e.g. Cast-iron foot 300 mm")
         with mc2:
             existing_cats = sorted(stand_components_df["Category"].dropna().unique()) if not stand_components_df.empty else []
             base_cats = sorted(set(existing_cats) | {"Foot", "Column", "Pipe"})
             NEW_CAT = "➕ New category…"
             cat_choice = st.selectbox("Category", base_cats + [NEW_CAT], key="stand_new_cat_choice")
             new_cat = st.text_input("New category name", key="stand_new_cat") if cat_choice == NEW_CAT else cat_choice
-        with mc3:
             new_h = st.number_input("Height (mm)", min_value=0.0, step=10.0, value=0.0, key="stand_new_h")
 
         if st.button("➕ Add / update component", width="stretch"):
-            ok, msg = db.add_stand_component(new_comp_pn, new_cat, new_h)
+            ok, msg = db.add_stand_component(new_comp_pn, new_cat, new_h, description=new_comp_desc)
             if ok:
                 load_stand_cached.clear()
                 st.success(msg)
@@ -747,7 +755,7 @@ with tab_stand:
                 d0, d1, d2, d3, d4 = st.columns([1.4, 1.6, 2.6, 1, 0.8])
                 d0.write(r["Category"])
                 d1.write(r["PartNumber"])
-                d2.write(_part_desc.get(r["PartNumber"], ""))
+                d2.write(r["Description"] if pd.notna(r["Description"]) else "")
                 d3.write(f"{r['Height_mm']:g} mm" if pd.notna(r["Height_mm"]) else "—")
                 if d4.button("✕", key=f"delstandcomp_{r['PartNumber']}"):
                     ok, msg = db.delete_stand_component(r["PartNumber"])
@@ -757,3 +765,13 @@ with tab_stand:
                         st.rerun()
                     else:
                         st.error(msg)
+
+            # Export the palette so it can be committed back to datasetts/stand_components.csv
+            palette_csv = stand_components_df[["PartNumber", "Category", "Height_mm", "Description", "Notes"]] \
+                if "Notes" in stand_components_df.columns else stand_components_df
+            st.download_button(
+                "⬇️ Export palette as CSV (for datasetts/stand_components.csv)",
+                data=palette_csv.to_csv(index=False).encode("utf-8"),
+                file_name="stand_components.csv",
+                mime="text/csv",
+            )
