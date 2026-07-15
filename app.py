@@ -36,6 +36,12 @@ def load_tables_cached():
 
 machines_df, parts_df, machine_parts_df, kit_components_df = load_tables_cached()
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_stand_cached():
+    return db.load_stand_tables()
+
+stand_components_df, stand_configs_df, stand_items_df = load_stand_cached()
+
 # Friendly dropdown labels: show "PartNumber — Description" while the selectbox
 # still returns just the part number, so no downstream code changes.
 _part_desc = dict(zip(parts_df["PartNumber"], parts_df["Description"].fillna("")))
@@ -50,12 +56,13 @@ if "machine_counts_store" not in st.session_state:
 # ================================================================
 # MAIN TABS
 # ================================================================
-tab_calc, tab_add_part, tab_add_link, tab_edit, tab_machines = st.tabs([
+tab_calc, tab_add_part, tab_add_link, tab_edit, tab_machines, tab_stand = st.tabs([
     "🧮 Calculate Spare Parts",
     "➕ Add New Part",
     "🔗 Link Part to Machine",
     "🛠️ Edit / Delete Part",
     "🏭 Machines",
+    "🏗️ Stand Builder",
 ])
 
 # ================================================================
@@ -574,3 +581,179 @@ with tab_machines:
                 st.rerun()
             else:
                 st.error(msg)
+# ================================================================
+# TAB 6 — STAND BUILDER
+# ================================================================
+with tab_stand:
+    st.subheader("Stand Builder")
+    st.caption("Build a printer stand from feet, columns and pipes — get a parts list and total height, and save configurations to reuse.")
+
+    all_partnums = sorted(parts_df["PartNumber"].dropna().unique())
+
+    if "stand_build" not in st.session_state:
+        st.session_state.stand_build = {}   # PartNumber -> {"Category":..., "Qty":...}
+
+    # helper lookups
+    comp_cat    = dict(zip(stand_components_df["PartNumber"], stand_components_df["Category"]))    if not stand_components_df.empty else {}
+    comp_height = dict(zip(stand_components_df["PartNumber"], stand_components_df["Height_mm"]))   if not stand_components_df.empty else {}
+
+    left, right = st.columns([1, 2], gap="large")
+
+    # ── LEFT: choose components ─────────────────────────────────
+    with left:
+        st.markdown("##### Choose components")
+        if stand_components_df.empty:
+            st.info("No stand components defined yet. Add some under **Manage stand components** below.")
+        else:
+            categories = sorted(stand_components_df["Category"].dropna().unique())
+            sel_cat = st.selectbox("Category", categories, key="stand_cat")
+            parts_in_cat = sorted(
+                stand_components_df.loc[stand_components_df["Category"] == sel_cat, "PartNumber"].unique()
+            )
+            sel_part = st.selectbox("Component", parts_in_cat, format_func=fmt_part, key="stand_part")
+            sel_qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="stand_qty")
+
+            if st.button("＋ Add to stand", width="stretch"):
+                b = st.session_state.stand_build
+                if sel_part in b:
+                    b[sel_part]["Qty"] += sel_qty
+                else:
+                    b[sel_part] = {"Category": sel_cat, "Qty": sel_qty}
+                st.rerun()
+
+            if st.session_state.stand_build and st.button("🗑️ Clear stand", width="stretch"):
+                st.session_state.stand_build = {}
+                st.rerun()
+
+    # ── RIGHT: current build, BOM, height, save/load ────────────
+    with right:
+        build = st.session_state.stand_build
+
+        st.markdown("##### Current stand")
+        if not build:
+            st.info("No components added yet.")
+        else:
+            rows = []
+            total_height = 0.0
+            for pn, info in build.items():
+                desc = _part_desc.get(pn, "")
+                h = comp_height.get(pn, 0) or 0
+                qty = info["Qty"]
+                total_height += float(h) * qty
+                rows.append({
+                    "Category": info.get("Category", comp_cat.get(pn, "")),
+                    "PartNumber": pn,
+                    "Description": desc,
+                    "Height_mm": h,
+                    "Qty": qty,
+                })
+            bom = pd.DataFrame(rows).sort_values(["Category", "PartNumber"])
+
+            st.metric("Total height", f"{total_height:g} mm")
+
+            # rows with remove buttons
+            h0, h1, h2, h3, h4 = st.columns([1.4, 1.6, 2.4, 0.8, 0.8])
+            for c, t in zip((h0, h1, h2, h3, h4), ["Category", "Part", "Description", "Qty", "Del"]):
+                c.markdown(f"**{t}**")
+            for _, r in bom.iterrows():
+                c0, c1, c2, c3, c4 = st.columns([1.4, 1.6, 2.4, 0.8, 0.8])
+                c0.write(r["Category"])
+                c1.write(r["PartNumber"])
+                c2.write(r["Description"])
+                c3.write(int(r["Qty"]))
+                if c4.button("✕", key=f"rmstand_{r['PartNumber']}"):
+                    del st.session_state.stand_build[r["PartNumber"]]
+                    st.rerun()
+
+            # export BOM
+            export_bom = bom[["Category", "PartNumber", "Description", "Qty", "Height_mm"]]
+            buf = BytesIO()
+            export_bom.to_excel(buf, index=False)
+            buf.seek(0)
+            st.download_button(
+                "📤 Export parts list", data=buf,
+                file_name="stand_bom.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        # ── save / load ─────────────────────────────────────────
+        st.divider()
+        st.markdown("##### Save / load configuration")
+        cfg_names = sorted(stand_configs_df["ConfigName"].dropna().unique()) if not stand_configs_df.empty else []
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            save_name = st.text_input("Configuration name", key="stand_save_name", placeholder="e.g. T60i tall stand")
+            if st.button("💾 Save configuration", width="stretch"):
+                items = [{"PartNumber": pn, "Category": i.get("Category", ""), "Qty": i["Qty"]}
+                         for pn, i in st.session_state.stand_build.items()]
+                ok, msg = db.save_stand_config(save_name, items)
+                if ok:
+                    load_stand_cached.clear()
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        with sc2:
+            if cfg_names:
+                load_name = st.selectbox("Saved configurations", cfg_names, key="stand_load_name")
+                b1, b2 = st.columns(2)
+                if b1.button("📂 Load", width="stretch"):
+                    items = stand_items_df[stand_items_df["ConfigName"] == load_name]
+                    st.session_state.stand_build = {
+                        row["PartNumber"]: {"Category": row["Category"], "Qty": int(row["Qty"])}
+                        for _, row in items.iterrows()
+                    }
+                    st.rerun()
+                if b2.button("🗑️ Delete", width="stretch"):
+                    ok, msg = db.delete_stand_config(load_name)
+                    if ok:
+                        load_stand_cached.clear()
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+            else:
+                st.caption("No saved configurations yet.")
+
+    # ── Manage stand components (define the palette) ────────────
+    st.divider()
+    with st.expander("🧩 Manage stand components (define what can be used)"):
+        st.caption("Register catalogue parts as stand components. Height is used to compute total stand height.")
+        mc1, mc2, mc3 = st.columns([2, 1.4, 1])
+        with mc1:
+            new_comp_pn = st.selectbox("Catalogue part", all_partnums, format_func=fmt_part, key="stand_new_pn")
+        with mc2:
+            existing_cats = sorted(stand_components_df["Category"].dropna().unique()) if not stand_components_df.empty else []
+            base_cats = sorted(set(existing_cats) | {"Foot", "Column", "Pipe"})
+            NEW_CAT = "➕ New category…"
+            cat_choice = st.selectbox("Category", base_cats + [NEW_CAT], key="stand_new_cat_choice")
+            new_cat = st.text_input("New category name", key="stand_new_cat") if cat_choice == NEW_CAT else cat_choice
+        with mc3:
+            new_h = st.number_input("Height (mm)", min_value=0.0, step=10.0, value=0.0, key="stand_new_h")
+
+        if st.button("➕ Add / update component", width="stretch"):
+            ok, msg = db.add_stand_component(new_comp_pn, new_cat, new_h)
+            if ok:
+                load_stand_cached.clear()
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+        if not stand_components_df.empty:
+            st.caption("Defined components:")
+            for _, r in stand_components_df.sort_values(["Category", "PartNumber"]).iterrows():
+                d0, d1, d2, d3, d4 = st.columns([1.4, 1.6, 2.6, 1, 0.8])
+                d0.write(r["Category"])
+                d1.write(r["PartNumber"])
+                d2.write(_part_desc.get(r["PartNumber"], ""))
+                d3.write(f"{r['Height_mm']:g} mm" if pd.notna(r["Height_mm"]) else "—")
+                if d4.button("✕", key=f"delstandcomp_{r['PartNumber']}"):
+                    ok, msg = db.delete_stand_component(r["PartNumber"])
+                    if ok:
+                        load_stand_cached.clear()
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)

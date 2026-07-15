@@ -48,6 +48,23 @@ _DDL = [
         "QtyPerKit"           INTEGER,
         PRIMARY KEY ("KitPartNumber", "ComponentPartNumber")
     )''',
+    '''CREATE TABLE IF NOT EXISTS stand_components (
+        "PartNumber" TEXT PRIMARY KEY,
+        "Category"   TEXT,
+        "Height_mm"  DOUBLE PRECISION,
+        "Notes"      TEXT
+    )''',
+    '''CREATE TABLE IF NOT EXISTS stand_configs (
+        "ConfigName" TEXT PRIMARY KEY,
+        "Notes"      TEXT
+    )''',
+    '''CREATE TABLE IF NOT EXISTS stand_config_items (
+        "ConfigName" TEXT,
+        "PartNumber" TEXT,
+        "Category"   TEXT,
+        "Qty"        INTEGER,
+        PRIMARY KEY ("ConfigName", "PartNumber")
+    )''',
 ]
 
 # Which CSV seeds which table, and the columns to keep (in order).
@@ -417,3 +434,102 @@ def delete_kit_component(kit_part_number, component_part_number):
     if res.rowcount == 0:
         return False, "Error: that component is not in the kit."
     return True, f"Removed '{component_part_number}' from kit '{kit_part_number}'."
+
+
+# ============================================================
+# STAND BUILDER
+# ============================================================
+def add_stand_component(part_number, category, height_mm, notes=""):
+    """Register a catalogue part as a buildable stand component in a category."""
+    pn = str(part_number).strip()
+    cat = str(category).strip()
+    if not pn:
+        return False, "Error: part number required."
+    if not cat:
+        return False, "Error: category required."
+    try:
+        h = float(height_mm)
+    except (TypeError, ValueError):
+        return False, "Error: height must be a number."
+    if h < 0:
+        return False, "Error: height cannot be negative."
+
+    eng = get_engine()
+    with eng.begin() as conn:
+        if not conn.execute(text('SELECT 1 FROM parts WHERE "PartNumber" = :pn'), {"pn": pn}).first():
+            return False, f"Error: '{pn}' is not in the catalogue — add it as a part first."
+        conn.execute(
+            text('''INSERT INTO stand_components ("PartNumber","Category","Height_mm","Notes")
+                    VALUES (:pn, :cat, :h, :n)
+                    ON CONFLICT ("PartNumber") DO UPDATE SET
+                        "Category"  = excluded."Category",
+                        "Height_mm" = excluded."Height_mm",
+                        "Notes"     = excluded."Notes"'''),
+            {"pn": pn, "cat": cat, "h": h, "n": str(notes).strip()},
+        )
+    return True, f"'{pn}' set as {cat} (height {h:g} mm)."
+
+
+def delete_stand_component(part_number):
+    """Remove a part from the stand palette (does not touch the catalogue)."""
+    eng = get_engine()
+    with eng.begin() as conn:
+        res = conn.execute(
+            text('DELETE FROM stand_components WHERE "PartNumber" = :pn'),
+            {"pn": str(part_number).strip()},
+        )
+    if res.rowcount == 0:
+        return False, "Error: component not found."
+    return True, f"Removed '{part_number}' from stand components."
+
+
+def load_stand_tables():
+    """Return (components, configs, config_items) as DataFrames."""
+    eng = get_engine()
+    with eng.connect() as conn:
+        comps = pd.read_sql(text('SELECT * FROM stand_components'), conn)
+        confs = pd.read_sql(text('SELECT * FROM stand_configs'), conn)
+        items = pd.read_sql(text('SELECT * FROM stand_config_items'), conn)
+    return comps, confs, items
+
+
+def save_stand_config(name, items, notes=""):
+    """
+    Save (or overwrite) a named stand configuration.
+    items: list of dicts with keys PartNumber, Category, Qty. Part numbers must
+    be unique within the list (merge quantities before calling).
+    """
+    nm = str(name).strip()
+    if not nm:
+        return False, "Error: configuration name required."
+    if not items:
+        return False, "Error: nothing to save — add components first."
+
+    eng = get_engine()
+    with eng.begin() as conn:
+        conn.execute(
+            text('''INSERT INTO stand_configs ("ConfigName","Notes") VALUES (:n, :notes)
+                    ON CONFLICT ("ConfigName") DO UPDATE SET "Notes" = excluded."Notes"'''),
+            {"n": nm, "notes": str(notes).strip()},
+        )
+        conn.execute(text('DELETE FROM stand_config_items WHERE "ConfigName" = :n'), {"n": nm})
+        for it in items:
+            conn.execute(
+                text('''INSERT INTO stand_config_items ("ConfigName","PartNumber","Category","Qty")
+                        VALUES (:n, :pn, :cat, :q)'''),
+                {"n": nm, "pn": str(it["PartNumber"]).strip(),
+                 "cat": str(it.get("Category", "")).strip(), "q": int(it["Qty"])},
+            )
+    return True, f"Saved configuration '{nm}' ({len(items)} item(s))."
+
+
+def delete_stand_config(name):
+    """Delete a saved stand configuration and its items."""
+    nm = str(name).strip()
+    eng = get_engine()
+    with eng.begin() as conn:
+        conn.execute(text('DELETE FROM stand_config_items WHERE "ConfigName" = :n'), {"n": nm})
+        res = conn.execute(text('DELETE FROM stand_configs WHERE "ConfigName" = :n'), {"n": nm})
+    if res.rowcount == 0:
+        return False, "Error: configuration not found."
+    return True, f"Deleted configuration '{nm}'."
