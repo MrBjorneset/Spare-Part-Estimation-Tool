@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  #bar { padding: 6px 0; }
+  button {
+    padding: 5px 12px; cursor: pointer; border: 1px solid #ccc;
+    border-radius: 6px; background: #f7f7f7; margin-right: 6px; font-size: 13px;
+  }
+  #apply { border-color: #4a7; background: #eafaf0; }
+  svg { border: 1px solid #eee; border-radius: 8px; background: #fff; touch-action: none; max-width: 100%; }
+  .piece { cursor: grab; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <button id="apply">✔ Use this arrangement</button>
+    <button id="reset">↺ Reset drag</button>
+  </div>
+  <svg id="stage"></svg>
+
+<script>
+(function () {
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var W = 420, H = 540, pieces = [], ground = "";
+  var svg = document.getElementById("stage");
+  var sel = null, ox = 0, oy = 0, tx = 0, ty = 0;
+
+  function send(type, extra) {
+    var msg = { isStreamlitMessage: true, type: type };
+    if (extra) for (var k in extra) msg[k] = extra[k];
+    window.parent.postMessage(msg, "*");
+  }
+
+  function pt(e) {
+    var b = svg.getBoundingClientRect();
+    return { x: (e.clientX - b.left) * (W / b.width), y: (e.clientY - b.top) * (H / b.height) };
+  }
+
+  function attachDrag(g) {
+    g.addEventListener("pointerdown", function (e) {
+      sel = g; g.setPointerCapture(e.pointerId);
+      var m = g.getAttribute("transform").match(/translate\(([-0-9.]+),([-0-9.]+)\)/);
+      tx = m ? +m[1] : 0; ty = m ? +m[2] : 0;
+      var p = pt(e); ox = p.x; oy = p.y; g.style.cursor = "grabbing";
+      svg.appendChild(g); // bring to front
+    });
+    g.addEventListener("pointermove", function (e) {
+      if (sel !== g) return;
+      var p = pt(e);
+      g.setAttribute("transform", "translate(" + (tx + p.x - ox) + "," + (ty + p.y - oy) + ")");
+    });
+    g.addEventListener("pointerup", function () {
+      if (sel === g) { sel = null; g.style.cursor = "grab"; }
+    });
+  }
+
+  function draw() {
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("width", W); svg.setAttribute("height", H);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    if (ground) {
+      var gg = document.createElementNS(SVGNS, "g");
+      gg.innerHTML = ground;              // baseline + dimension line (static)
+      svg.appendChild(gg);
+    }
+    pieces.forEach(function (p) {
+      var g = document.createElementNS(SVGNS, "g");
+      g.setAttribute("class", "piece");
+      g.setAttribute("transform", "translate(0,0)");
+      g.setAttribute("data-pn", p.pn);
+      var r = document.createElementNS(SVGNS, "rect");
+      r.setAttribute("x", p.x); r.setAttribute("y", p.y);
+      r.setAttribute("width", p.w); r.setAttribute("height", p.h);
+      r.setAttribute("rx", 2); r.setAttribute("fill", p.fill);
+      r.setAttribute("fill-opacity", 0.85); r.setAttribute("stroke", "#333");
+      var t = document.createElementNS(SVGNS, "text");
+      t.setAttribute("x", p.x + p.w / 2); t.setAttribute("y", p.y + p.h / 2 + 4);
+      t.setAttribute("font-size", 11); t.setAttribute("text-anchor", "middle");
+      t.setAttribute("fill", "#111"); t.setAttribute("pointer-events", "none");
+      t.textContent = p.label;
+      g.appendChild(r); g.appendChild(t); svg.appendChild(g);
+      attachDrag(g);
+    });
+  }
+
+  document.getElementById("reset").onclick = function () {
+    var gs = svg.querySelectorAll(".piece");
+    for (var i = 0; i < gs.length; i++) gs[i].setAttribute("transform", "translate(0,0)");
+  };
+
+  document.getElementById("apply").onclick = function () {
+    var out = {}, gs = svg.querySelectorAll(".piece");
+    for (var i = 0; i < gs.length; i++) {
+      var m = gs[i].getAttribute("transform").match(/translate\(([-0-9.]+),([-0-9.]+)\)/);
+      out[gs[i].getAttribute("data-pn")] = { dx: m ? +m[1] : 0, dy: m ? +m[2] : 0 };
+    }
+    send("streamlit:setComponentValue", { value: { positions: out, ts: Date.now() }, dataType: "json" });
+  };
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    var args = e.data.args || {};
+    if (args.canvas) { W = args.canvas.W || W; H = args.canvas.H || H; }
+    pieces = args.pieces || [];
+    ground = args.ground || "";
+    draw();
+    send("streamlit:setFrameHeight", { height: H + 56 });
+  });
+
+  send("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body>
+</html>
