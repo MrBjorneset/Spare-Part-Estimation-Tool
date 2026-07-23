@@ -68,6 +68,7 @@ _DDL = [
         "Category"    TEXT,
         "Qty"         INTEGER,
         "Orientation" TEXT,
+        "AttachesTo"  TEXT,
         PRIMARY KEY ("ConfigName", "PartNumber")
     )''',
 ]
@@ -138,6 +139,7 @@ def init_db():
         ("stand_components",   'ADD COLUMN "Diameter_mm" DOUBLE PRECISION'),
         ("stand_components",   'ADD COLUMN "Width_mm" DOUBLE PRECISION'),
         ("stand_config_items", 'ADD COLUMN "Orientation" TEXT'),
+        ("stand_config_items", 'ADD COLUMN "AttachesTo" TEXT'),
     ]:
         try:
             with eng.begin() as conn:
@@ -561,11 +563,13 @@ def save_stand_config(name, items, notes=""):
         conn.execute(text('DELETE FROM stand_config_items WHERE "ConfigName" = :n'), {"n": nm})
         for it in items:
             conn.execute(
-                text('''INSERT INTO stand_config_items ("ConfigName","PartNumber","Category","Qty","Orientation")
-                        VALUES (:n, :pn, :cat, :q, :o)'''),
+                text('''INSERT INTO stand_config_items
+                            ("ConfigName","PartNumber","Category","Qty","Orientation","AttachesTo")
+                        VALUES (:n, :pn, :cat, :q, :o, :a)'''),
                 {"n": nm, "pn": str(it["PartNumber"]).strip(),
                  "cat": str(it.get("Category", "")).strip(), "q": int(it["Qty"]),
-                 "o": str(it.get("Orientation", "")).strip()},
+                 "o": str(it.get("Orientation", "")).strip(),
+                 "a": str(it.get("AttachesTo", "")).strip()},
             )
     return True, f"Saved configuration '{nm}' ({len(items)} item(s))."
 

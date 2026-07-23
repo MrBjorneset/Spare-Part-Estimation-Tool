@@ -1,7 +1,124 @@
 import pandas as pd
 import math
+import re
 
 VALID_SERVICE_TYPES = {"Maintenance", "Jobb"}
+
+
+# ============================================================
+# STAND CLAMP HELPERS
+# ============================================================
+def _parse_pair(s):
+    """
+    Extract a diameter pair like '50x30' / '50X30' / '50×30' from a string
+    (a part number or description) and return it as an unordered frozenset so
+    that '50x30' and '30x50' match the same junction. '50x50' collapses to a
+    single value, which correctly matches a junction of two Ø50 pipes.
+    Returns None if no pair is found.
+    """
+    m = re.search(r"(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)", str(s))
+    if not m:
+        return None
+    return frozenset({float(m.group(1)), float(m.group(2))})
+
+
+def resolve_clamps(build, comp_length, comp_diameter, stand_components_df, desc_map,
+                   base_cat="Clamp", cross_cat="Cross clamp"):
+    """
+    Work out which clamps a stand needs.
+
+    Every pipe in the build must attach to something (info["AttachesTo"]):
+      - "__BASE__"  → the column/base. Needs a BASE clamp sized to the pipe's own
+                       diameter (exact match against a base-clamp's Diameter_mm).
+      - <other pipe PartNumber> → a pipe-to-pipe junction. Needs a CROSS clamp
+                       matching the unordered pair of the two pipe diameters,
+                       identified by parsing the clamp's part number/description.
+
+    Clamp quantity scales with the pipe's quantity (one clamp per pipe unit).
+    Clamps are connectors: callers should keep them OUT of the height total and
+    the draggable stack, and only add the returned rows to the parts list (BOM).
+
+    Parameters
+    ----------
+    build         : dict  PartNumber -> {"Qty":int, "Orientation":str,
+                          "AttachesTo":str, ...}
+    comp_length   : dict  PartNumber -> length_mm  (a component is a pipe if > 0)
+    comp_diameter : dict  PartNumber -> diameter_mm
+    stand_components_df : the stand palette (needs Category, Diameter_mm,
+                          PartNumber, Description)
+    desc_map      : dict  PartNumber -> description (for BOM rows)
+
+    Returns
+    -------
+    (rows, warnings)
+      rows     : list of {PartNumber, Description, Qty, ClampType, ForPipe}
+      warnings : list of human-readable strings for junctions with no clamp
+    """
+    def _is_pipe(pn):
+        return float(comp_length.get(pn) or 0) > 0
+
+    if stand_components_df is None or stand_components_df.empty:
+        base = pd.DataFrame(columns=["PartNumber", "Category", "Diameter_mm", "Description"])
+        cross = base.copy()
+    else:
+        base = stand_components_df[stand_components_df["Category"] == base_cat]
+        cross = stand_components_df[stand_components_df["Category"] == cross_cat].copy()
+
+    # Pre-parse cross-clamp pairs from part number, falling back to description.
+    if not cross.empty:
+        cross["_pair"] = cross["PartNumber"].map(_parse_pair)
+        need = cross["_pair"].isna()
+        if "Description" in cross.columns:
+            cross.loc[need, "_pair"] = cross.loc[need, "Description"].map(_parse_pair)
+
+    qty = {}          # clamp PartNumber -> total qty
+    meta = {}         # clamp PartNumber -> (ClampType, ForPipe-example)
+    warnings = []
+
+    for pn, info in build.items():
+        if not _is_pipe(pn):
+            continue
+
+        d = float(comp_diameter.get(pn) or 0)
+        n = int(info.get("Qty", 1))
+        parent = info.get("AttachesTo", "__BASE__")
+
+        if parent in (None, "", "__BASE__"):
+            # pipe → column: base clamp sized to this pipe's diameter
+            if d <= 0:
+                warnings.append(f"Pipe '{pn}' has no diameter set — can't size a base clamp.")
+                continue
+            hit = base[base["Diameter_mm"] == d]
+            label, ctype = f"base clamp Ø{d:g} mm", "Base"
+        else:
+            # pipe → pipe: cross clamp sized to the pair of diameters
+            d2 = float(comp_diameter.get(parent) or 0)
+            if d <= 0 or d2 <= 0:
+                warnings.append(
+                    f"Junction '{pn}' ↔ '{parent}' is missing a diameter — can't size a cross clamp."
+                )
+                continue
+            want = frozenset({d, d2})
+            hit = cross[cross["_pair"] == want] if "_pair" in cross.columns else cross.iloc[0:0]
+            label, ctype = f"cross clamp {d:g}x{d2:g}", "Cross"
+
+        if hit.empty:
+            warnings.append(f"No {label} defined for pipe '{pn}'.")
+            continue
+
+        cpn = hit.iloc[0]["PartNumber"]
+        qty[cpn] = qty.get(cpn, 0) + n
+        meta.setdefault(cpn, (ctype, pn))
+
+    rows = [{
+        "PartNumber": cpn,
+        "Description": desc_map.get(cpn, ""),
+        "Qty": q,
+        "ClampType": meta[cpn][0],
+        "ForPipe": meta[cpn][1],
+    } for cpn, q in qty.items()]
+
+    return rows, warnings
 
 
 # ============================================================

@@ -4,7 +4,7 @@ import html
 import streamlit.components.v1 as components
 from io import BytesIO
 import db
-from logic import calculate_spare_parts, add_part, add_machine_part, get_kit_breakdown
+from logic import calculate_spare_parts, add_part, add_machine_part, get_kit_breakdown, resolve_clamps
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
@@ -22,7 +22,7 @@ st.caption("Maintenance & job-based spare part estimation")
 # SCHEMA_VERSION is part of the cache key: bump it whenever the schema changes so
 # that init_db() (and its migrations) re-runs on the next deploy, even if the
 # cached resource from a previous version is still around.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 @st.cache_resource
 def _bootstrap_db(schema_version):
@@ -793,8 +793,26 @@ with tab_stand:
                     f"Length {float(comp_length.get(sel_part) or 0):g} mm  ·  "
                     f"Ø {float(comp_diameter.get(sel_part) or 0):g} mm"
                 )
+
+                # What this pipe clamps onto — drives which clamp is added:
+                #   Column / base  → base clamp sized to this pipe's diameter
+                #   another pipe   → cross clamp sized to the pair of diameters
+                other_pipes = [
+                    p for p in st.session_state.stand_build
+                    if is_pipe(p) and p != sel_part
+                ]
+                BASE_LABEL = "Column / base"
+                attach_options = [BASE_LABEL] + other_pipes
+                sel_attach_label = st.selectbox(
+                    "Attaches to", attach_options, key="stand_attach",
+                    format_func=lambda p: BASE_LABEL if p == BASE_LABEL else fmt_stand(p),
+                    help="A base clamp is added for pipe→column; a cross clamp for pipe→pipe. "
+                         "Clamps appear in the parts list automatically.",
+                )
+                sel_attach = "__BASE__" if sel_attach_label == BASE_LABEL else sel_attach_label
             else:
                 sel_orient = ""
+                sel_attach = ""
 
             sel_qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="stand_qty")
 
@@ -803,8 +821,10 @@ with tab_stand:
                 if sel_part in b:
                     b[sel_part]["Qty"] += sel_qty
                     b[sel_part]["Orientation"] = sel_orient
+                    b[sel_part]["AttachesTo"] = sel_attach
                 else:
-                    b[sel_part] = {"Category": sel_cat, "Qty": sel_qty, "Orientation": sel_orient}
+                    b[sel_part] = {"Category": sel_cat, "Qty": sel_qty,
+                                   "Orientation": sel_orient, "AttachesTo": sel_attach}
                 st.rerun()
 
             if st.session_state.stand_build and st.button("🗑️ Clear stand", width="stretch"):
@@ -846,8 +866,20 @@ with tab_stand:
                 })
             bom = pd.DataFrame(rows)
 
+            # Clamps are DERIVED from the pipes and their "Attaches to" choice:
+            # base clamp for pipe→column, cross clamp for pipe→pipe. They are
+            # connectors, so they are deliberately kept out of the height total
+            # and the draggable stack — they only appear in the parts list.
+            clamp_rows, clamp_warnings = resolve_clamps(
+                build, comp_length, comp_diameter, stand_components_df, _stand_desc,
+            )
+
             st.metric("Total height", f"{total_height:g} mm")
-            st.caption("Total height counts feet/columns and **vertical** pipes only.")
+            st.caption("Total height counts feet/columns and **vertical** pipes only. "
+                       "Clamps are connectors and don't affect height.")
+
+            for w in clamp_warnings:
+                st.warning(w)
 
             layout = _stand_layout(build, comp_height, comp_length, comp_diameter, comp_width)
             if layout:
@@ -895,8 +927,32 @@ with tab_stand:
                     del st.session_state.stand_build[pn]
                     st.rerun()
 
-            # export BOM
-            export_bom = bom[["Category", "PartNumber", "Description", "Qty", "Dimensions_mm", "Orientation"]]
+            # ── clamps added automatically ──────────────────────
+            clamp_bom = pd.DataFrame(columns=["Category", "PartNumber", "Description",
+                                              "Qty", "Dimensions_mm", "Orientation"])
+            if clamp_rows:
+                st.markdown("##### Clamps (added automatically)")
+                st.caption("Derived from each pipe's **Attaches to** choice — "
+                           "base clamp for pipe→column, cross clamp for pipe→pipe.")
+                clamp_bom = pd.DataFrame([{
+                    "Category": f"{c['ClampType']} clamp",
+                    "PartNumber": c["PartNumber"],
+                    "Description": c["Description"],
+                    "Qty": c["Qty"],
+                    "Dimensions_mm": "—",
+                    "Orientation": "—",
+                } for c in clamp_rows])
+                st.dataframe(
+                    clamp_bom[["Category", "PartNumber", "Description", "Qty"]],
+                    hide_index=True, width="stretch",
+                )
+
+            # export BOM (pipes/feet/columns + auto clamps)
+            export_bom = pd.concat(
+                [bom[["Category", "PartNumber", "Description", "Qty", "Dimensions_mm", "Orientation"]],
+                 clamp_bom],
+                ignore_index=True,
+            )
             buf = BytesIO()
             export_bom.to_excel(buf, index=False)
             buf.seek(0)
@@ -917,6 +973,7 @@ with tab_stand:
             if st.button("💾 Save configuration", width="stretch"):
                 items = [{"PartNumber": pn, "Category": i.get("Category", ""), "Qty": i["Qty"],
                           "Orientation": i.get("Orientation", ""),
+                          "AttachesTo": i.get("AttachesTo", ""),
                           "PosX_mm": (i.get("Pos") or {}).get("dx"),
                           "PosY_mm": (i.get("Pos") or {}).get("dy")}
                          for pn, i in st.session_state.stand_build.items()]
@@ -940,6 +997,8 @@ with tab_stand:
                             "Qty": int(row["Qty"]),
                             "Orientation": (row["Orientation"] if "Orientation" in items.columns
                                             and pd.notna(row["Orientation"]) else ""),
+                            "AttachesTo": (row["AttachesTo"] if "AttachesTo" in items.columns
+                                           and pd.notna(row["AttachesTo"]) else ""),
                         }
                         if "PosX_mm" in items.columns and pd.notna(row.get("PosX_mm")):
                             entry["Pos"] = {"dx": float(row["PosX_mm"]),
