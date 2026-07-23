@@ -1,8 +1,13 @@
 import streamlit as st
 import pandas as pd
 import html
+import os
 import streamlit.components.v1 as components
 from io import BytesIO
+
+# Custom drag component (returns committed piece positions from the browser).
+_STAND_DRAG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stand_drag_component")
+_stand_drag = components.declare_component("stand_drag", path=_STAND_DRAG_DIR)
 import db
 from logic import calculate_spare_parts, add_part, add_machine_part, get_kit_breakdown
 
@@ -22,7 +27,7 @@ st.caption("Maintenance & job-based spare part estimation")
 # SCHEMA_VERSION is part of the cache key: bump it whenever the schema changes so
 # that init_db() (and its migrations) re-runs on the next deploy, even if the
 # cached resource from a previous version is still around.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 @st.cache_resource
 def _bootstrap_db(schema_version):
@@ -70,20 +75,21 @@ def _stand_layout(build, comp_height, comp_length, comp_diameter, comp_width):
     for pn, info in build.items():
         qty = int(info.get("Qty", 1))
         orient = info.get("Orientation", "")
+        pos = info.get("Pos") or {"dx": 0.0, "dy": 0.0}
         L, D = num(comp_length, pn), num(comp_diameter, pn)
         if L > 0:
             if orient == "Horizontal":
                 w, h, kind = L, (D if D > 0 else 20), "hpipe"
-                raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": kind, "qty": qty})
+                raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": kind, "qty": qty, "pn": pn, "pos": pos})
             else:
                 w, h, kind = (D if D > 0 else 20), L * qty, "vpipe"
-                raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": kind, "qty": qty})
+                raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": kind, "qty": qty, "pn": pn, "pos": pos})
                 cur_y += h
         else:
             H, W = num(comp_height, pn), num(comp_width, pn)
             w = W if W > 0 else 80
             h = (H if H > 0 else 20) * qty
-            raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "solid", "qty": qty})
+            raw.append({"w": w, "h": h, "y0": cur_y, "label": pn, "kind": "solid", "qty": qty, "pn": pn, "pos": pos})
             cur_y += h
 
     if not raw:
@@ -105,12 +111,14 @@ def _stand_layout(build, comp_height, comp_length, comp_diameter, comp_width):
     pieces = []
     for p in raw:
         w_px, h_px = p["w"] * scale, p["h"] * scale
+        # base auto-stack position, then apply any committed manual offset (stored in mm-equiv)
+        x = center_x - w_px / 2 + p["pos"].get("dx", 0.0) * scale
+        y = baseline_y - (p["y0"] + p["h"]) * scale + p["pos"].get("dy", 0.0) * scale
         pieces.append({
-            "x": center_x - w_px / 2,
-            "y": baseline_y - (p["y0"] + p["h"]) * scale,
-            "w": w_px, "h": h_px,
+            "x": x, "y": y, "w": w_px, "h": h_px,
             "fill": colors[p["kind"]],
             "label": p["label"] + (f' ×{p["qty"]}' if p["qty"] > 1 else ''),
+            "pn": p["pn"],
         })
     return {"pieces": pieces, "W": W_px, "H": H_px, "total_h": total_h,
             "scale": scale, "baseline_y": baseline_y, "m_left": m_left}
@@ -856,10 +864,33 @@ with tab_stand:
                     if view_mode == "Static":
                         st.markdown(f'<div style="text-align:center">{render_static_svg(layout)}</div>',
                                     unsafe_allow_html=True)
-                        st.caption("Schematic front elevation, stacked in the order added.")
+                        st.caption("Schematic front elevation. Reflects any committed manual placement.")
                     else:
-                        components.html(render_interactive_html(layout), height=layout["H"] + 70)
-                        st.caption("Drag pieces to rearrange on screen. This is for visual experimenting only — it isn't saved. Use ↺ Reset or the ▲▼ buttons in the list to change the actual stack.")
+                        result = _stand_drag(
+                            pieces=layout["pieces"],
+                            canvas={"W": layout["W"], "H": layout["H"]},
+                            ground=_dim_and_ground(layout),
+                            key="stand_drag",
+                        )
+                        # commit dragged offsets once, when "Use this arrangement" was clicked
+                        if (isinstance(result, dict)
+                                and result.get("ts") != st.session_state.get("stand_last_ts")):
+                            st.session_state.stand_last_ts = result.get("ts")
+                            scale = layout["scale"] or 1
+                            for pn, off in (result.get("positions") or {}).items():
+                                if pn in st.session_state.stand_build:
+                                    cur = st.session_state.stand_build[pn].get("Pos") or {"dx": 0.0, "dy": 0.0}
+                                    st.session_state.stand_build[pn]["Pos"] = {
+                                        "dx": cur.get("dx", 0.0) + off.get("dx", 0.0) / scale,
+                                        "dy": cur.get("dy", 0.0) + off.get("dy", 0.0) / scale,
+                                    }
+                            st.rerun()
+                        st.caption("Drag pieces, then **✔ Use this arrangement** to commit — the layout sticks and is saved with the configuration. ↺ Reset drag clears the current unsaved drag.")
+                        if any(v.get("Pos") for v in st.session_state.stand_build.values()):
+                            if st.button("↩︎ Clear manual placement (back to auto-stack)", key="clear_pos"):
+                                for v in st.session_state.stand_build.values():
+                                    v.pop("Pos", None)
+                                st.rerun()
 
             # piece list in stack order (top of stack first), with reorder + remove
             st.caption("Stack (top → bottom). Use ▲▼ to reorder, ✕ to remove:")
@@ -913,7 +944,9 @@ with tab_stand:
             save_name = st.text_input("Configuration name", key="stand_save_name", placeholder="e.g. T60i tall stand")
             if st.button("💾 Save configuration", width="stretch"):
                 items = [{"PartNumber": pn, "Category": i.get("Category", ""), "Qty": i["Qty"],
-                          "Orientation": i.get("Orientation", "")}
+                          "Orientation": i.get("Orientation", ""),
+                          "PosX_mm": (i.get("Pos") or {}).get("dx"),
+                          "PosY_mm": (i.get("Pos") or {}).get("dy")}
                          for pn, i in st.session_state.stand_build.items()]
                 ok, msg = db.save_stand_config(save_name, items)
                 if ok:
@@ -928,15 +961,19 @@ with tab_stand:
                 b1, b2 = st.columns(2)
                 if b1.button("📂 Load", width="stretch"):
                     items = stand_items_df[stand_items_df["ConfigName"] == load_name]
-                    st.session_state.stand_build = {
-                        row["PartNumber"]: {
+                    new_build = {}
+                    for _, row in items.iterrows():
+                        entry = {
                             "Category": row["Category"],
                             "Qty": int(row["Qty"]),
                             "Orientation": (row["Orientation"] if "Orientation" in items.columns
                                             and pd.notna(row["Orientation"]) else ""),
                         }
-                        for _, row in items.iterrows()
-                    }
+                        if "PosX_mm" in items.columns and pd.notna(row.get("PosX_mm")):
+                            entry["Pos"] = {"dx": float(row["PosX_mm"]),
+                                            "dy": float(row["PosY_mm"] if pd.notna(row.get("PosY_mm")) else 0)}
+                        new_build[row["PartNumber"]] = entry
+                    st.session_state.stand_build = new_build
                     st.rerun()
                 if b2.button("🗑️ Delete", width="stretch"):
                     ok, msg = db.delete_stand_config(load_name)
