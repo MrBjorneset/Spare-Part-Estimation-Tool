@@ -1,13 +1,8 @@
 import streamlit as st
 import pandas as pd
 import html
-import os
 import streamlit.components.v1 as components
 from io import BytesIO
-
-# Custom drag component (returns committed piece positions from the browser).
-_STAND_DRAG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stand_drag_component")
-_stand_drag = components.declare_component("stand_drag", path=_STAND_DRAG_DIR)
 import db
 from logic import calculate_spare_parts, add_part, add_machine_part, get_kit_breakdown
 
@@ -864,33 +859,10 @@ with tab_stand:
                     if view_mode == "Static":
                         st.markdown(f'<div style="text-align:center">{render_static_svg(layout)}</div>',
                                     unsafe_allow_html=True)
-                        st.caption("Schematic front elevation. Reflects any committed manual placement.")
+                        st.caption("Schematic front elevation, stacked in the order added.")
                     else:
-                        result = _stand_drag(
-                            pieces=layout["pieces"],
-                            canvas={"W": layout["W"], "H": layout["H"]},
-                            ground=_dim_and_ground(layout),
-                            key="stand_drag",
-                        )
-                        # commit dragged offsets once, when "Use this arrangement" was clicked
-                        if (isinstance(result, dict)
-                                and result.get("ts") != st.session_state.get("stand_last_ts")):
-                            st.session_state.stand_last_ts = result.get("ts")
-                            scale = layout["scale"] or 1
-                            for pn, off in (result.get("positions") or {}).items():
-                                if pn in st.session_state.stand_build:
-                                    cur = st.session_state.stand_build[pn].get("Pos") or {"dx": 0.0, "dy": 0.0}
-                                    st.session_state.stand_build[pn]["Pos"] = {
-                                        "dx": cur.get("dx", 0.0) + off.get("dx", 0.0) / scale,
-                                        "dy": cur.get("dy", 0.0) + off.get("dy", 0.0) / scale,
-                                    }
-                            st.rerun()
-                        st.caption("Drag pieces, then **✔ Use this arrangement** to commit — the layout sticks and is saved with the configuration. ↺ Reset drag clears the current unsaved drag.")
-                        if any(v.get("Pos") for v in st.session_state.stand_build.values()):
-                            if st.button("↩︎ Clear manual placement (back to auto-stack)", key="clear_pos"):
-                                for v in st.session_state.stand_build.values():
-                                    v.pop("Pos", None)
-                                st.rerun()
+                        components.html(render_interactive_html(layout), height=layout["H"] + 70)
+                        st.caption("Drag pieces to rearrange on screen. This is for visual experimenting only — it isn't saved. Use ↺ Reset, or the ▲▼ buttons in the list to change the actual stack.")
 
             # piece list in stack order (top of stack first), with reorder + remove
             st.caption("Stack (top → bottom). Use ▲▼ to reorder, ✕ to remove:")
