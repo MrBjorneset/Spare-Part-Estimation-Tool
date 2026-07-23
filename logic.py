@@ -22,58 +22,64 @@ def _parse_pair(s):
     return frozenset({float(m.group(1)), float(m.group(2))})
 
 
+def _parse_single(s):
+    """First standalone number in a string, e.g. 'Base Clamp 50' -> 50.0. None if none."""
+    m = re.search(r"(\d+(?:\.\d+)?)", str(s))
+    return float(m.group(1)) if m else None
+
+
 def resolve_clamps(build, comp_length, comp_diameter, stand_components_df, desc_map,
-                   base_cat="Clamp", cross_cat="Cross clamp"):
+                   clamp_category_contains="clamp"):
     """
     Work out which clamps a stand needs.
 
     Every pipe in the build must attach to something (info["AttachesTo"]):
       - "__BASE__"  → the column/base. Needs a BASE clamp sized to the pipe's own
-                       diameter (exact match against a base-clamp's Diameter_mm).
+                       diameter.
       - <other pipe PartNumber> → a pipe-to-pipe junction. Needs a CROSS clamp
-                       matching the unordered pair of the two pipe diameters,
-                       identified by parsing the clamp's part number/description.
+                       matching the unordered pair of the two pipe diameters.
+
+    Clamp definitions are read from the stand palette. Any component whose
+    Category contains "clamp" (case-insensitive) is a clamp candidate. Its ROLE
+    and SIZE are inferred from its part number / description:
+      - a pair like "50x30" (or "50X30" / "50×30") → a CROSS clamp for that pair;
+        "50x50" collapses to a single value and matches a Ø50↔Ø50 junction.
+      - otherwise → a BASE clamp; its diameter is the Diameter_mm column if set,
+        else the first number in its description ("Base Clamp 50" → 50).
 
     Clamp quantity scales with the pipe's quantity (one clamp per pipe unit).
     Clamps are connectors: callers should keep them OUT of the height total and
     the draggable stack, and only add the returned rows to the parts list (BOM).
 
-    Parameters
-    ----------
-    build         : dict  PartNumber -> {"Qty":int, "Orientation":str,
-                          "AttachesTo":str, ...}
-    comp_length   : dict  PartNumber -> length_mm  (a component is a pipe if > 0)
-    comp_diameter : dict  PartNumber -> diameter_mm
-    stand_components_df : the stand palette (needs Category, Diameter_mm,
-                          PartNumber, Description)
-    desc_map      : dict  PartNumber -> description (for BOM rows)
-
-    Returns
-    -------
-    (rows, warnings)
+    Returns (rows, warnings):
       rows     : list of {PartNumber, Description, Qty, ClampType, ForPipe}
       warnings : list of human-readable strings for junctions with no clamp
     """
     def _is_pipe(pn):
         return float(comp_length.get(pn) or 0) > 0
 
-    if stand_components_df is None or stand_components_df.empty:
-        base = pd.DataFrame(columns=["PartNumber", "Category", "Diameter_mm", "Description"])
-        cross = base.copy()
-    else:
-        base = stand_components_df[stand_components_df["Category"] == base_cat]
-        cross = stand_components_df[stand_components_df["Category"] == cross_cat].copy()
+    # Build lookups from the palette: base clamps by diameter, cross clamps by pair.
+    base_by_dia = {}     # diameter(float) -> PartNumber
+    cross_by_pair = {}   # frozenset -> PartNumber
+    if stand_components_df is not None and not stand_components_df.empty:
+        want = str(clamp_category_contains).lower()
+        for _, r in stand_components_df.iterrows():
+            cat = str(r.get("Category", "")).lower()
+            if want not in cat:
+                continue
+            pn = r["PartNumber"]
+            desc = r.get("Description", "")
+            pair = _parse_pair(pn) or _parse_pair(desc)
+            if pair is not None:                       # a "NxM" name → cross clamp
+                cross_by_pair.setdefault(pair, pn)
+            else:                                      # base clamp
+                dia = float(r.get("Diameter_mm") or 0)
+                if dia <= 0:
+                    dia = _parse_single(desc) or 0     # fall back to the name
+                if dia > 0:
+                    base_by_dia.setdefault(float(dia), pn)
 
-    # Pre-parse cross-clamp pairs from part number, falling back to description.
-    if not cross.empty:
-        cross["_pair"] = cross["PartNumber"].map(_parse_pair)
-        need = cross["_pair"].isna()
-        if "Description" in cross.columns:
-            cross.loc[need, "_pair"] = cross.loc[need, "Description"].map(_parse_pair)
-
-    qty = {}          # clamp PartNumber -> total qty
-    meta = {}         # clamp PartNumber -> (ClampType, ForPipe-example)
-    warnings = []
+    qty, meta, warnings = {}, {}, []
 
     for pn, info in build.items():
         if not _is_pipe(pn):
@@ -84,29 +90,25 @@ def resolve_clamps(build, comp_length, comp_diameter, stand_components_df, desc_
         parent = info.get("AttachesTo", "__BASE__")
 
         if parent in (None, "", "__BASE__"):
-            # pipe → column: base clamp sized to this pipe's diameter
             if d <= 0:
                 warnings.append(f"Pipe '{pn}' has no diameter set — can't size a base clamp.")
                 continue
-            hit = base[base["Diameter_mm"] == d]
+            cpn = base_by_dia.get(d)
             label, ctype = f"base clamp Ø{d:g} mm", "Base"
         else:
-            # pipe → pipe: cross clamp sized to the pair of diameters
             d2 = float(comp_diameter.get(parent) or 0)
             if d <= 0 or d2 <= 0:
                 warnings.append(
                     f"Junction '{pn}' ↔ '{parent}' is missing a diameter — can't size a cross clamp."
                 )
                 continue
-            want = frozenset({d, d2})
-            hit = cross[cross["_pair"] == want] if "_pair" in cross.columns else cross.iloc[0:0]
+            cpn = cross_by_pair.get(frozenset({d, d2}))
             label, ctype = f"cross clamp {d:g}x{d2:g}", "Cross"
 
-        if hit.empty:
+        if not cpn:
             warnings.append(f"No {label} defined for pipe '{pn}'.")
             continue
 
-        cpn = hit.iloc[0]["PartNumber"]
         qty[cpn] = qty.get(cpn, 0) + n
         meta.setdefault(cpn, (ctype, pn))
 
